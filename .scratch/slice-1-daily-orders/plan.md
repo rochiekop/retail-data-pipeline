@@ -1368,8 +1368,11 @@ def _quarantine(client):
     ).result_rows
 
 
-def _order(order_id, status="delivered", purchased="2017-11-24 09:00:00"):
-    return {"order_id": order_id, "customer_id": "c1", "order_status": status, "order_purchase_timestamp": purchased}
+def _order(order_id, status="delivered", purchased="2017-11-24 09:00:00", customer_id="c1"):
+    return {
+        "order_id": order_id, "customer_id": customer_id, "order_status": status,
+        "order_purchase_timestamp": purchased,
+    }
 
 
 def test_valid_orders_reach_silver(bronze_loaded):
@@ -1383,21 +1386,49 @@ def test_valid_orders_reach_silver(bronze_loaded):
     assert _quarantine(bronze_loaded) == []
 
 
+def test_rows_added_to_the_latest_load_reach_silver(bronze_loaded, add_bronze_rows):
+    # Guards the fixture itself: if its rows missed the latest load, every bad-row test would pass vacuously.
+    add_bronze_rows("orders", [_order("o6")])
+    run_step("silver", D)
+    assert "o6" in [r[0] for r in _orders(bronze_loaded)]
+
+
 def test_bad_orders_go_to_quarantine(bronze_loaded, add_bronze_rows):
     add_bronze_rows(
         "orders",
         [
+            _order(None),
             _order("o9", purchased="not-a-date"),
             _order("o8", status="teleported"),
+            _order("o7", status=None),
+            _order("o6", customer_id=None),
             _order("o1", purchased="2017-11-24 10:00:00"),
         ],
     )
     run_step("silver", D)
     assert _quarantine(bronze_loaded) == [
+        ("order", "(missing)", "missing order_id"),
         ("order", "o1", "duplicate order_id"),
+        ("order", "o6", "missing customer_id"),
+        ("order", "o7", "missing order_status"),
         ("order", "o8", "unknown order_status"),
         ("order", "o9", "invalid order_purchase_timestamp"),
     ]
+    assert [r[0] for r in _orders(bronze_loaded)] == ["o1", "o2", "o3", "o5"]
+
+
+def test_a_valid_copy_wins_over_an_invalid_duplicate(bronze_loaded, add_bronze_rows):
+    # "approved" sorts before "delivered"; if the bad copy ranked first, o1 would leave Silver entirely.
+    add_bronze_rows("orders", [_order("o1", status="approved", purchased="bad")])
+    run_step("silver", D)
+    assert _orders(bronze_loaded)[0] == ("o1", "delivered", "2017-11-24 10:00:00")
+    assert _quarantine(bronze_loaded) == [("order", "o1", "duplicate order_id")]
+
+
+def test_silver_reads_only_the_latest_load(bronze_loaded, add_bronze_rows):
+    add_bronze_rows("orders", [_order("o9")])
+    run_step("bronze", D)  # a new, clean load of the same Business Date
+    run_step("silver", D)
     assert [r[0] for r in _orders(bronze_loaded)] == ["o1", "o2", "o3", "o5"]
 
 
@@ -1415,6 +1446,7 @@ def test_rerun_replaces_the_business_date(bronze_loaded):
     run_step("silver", D)
     run_step("silver", D)
     assert len(_orders(bronze_loaded)) == 4
+    assert bronze_loaded.query("select count() from silver.order_items").result_rows == [(4,)]
 
 
 def test_cli_rejects_a_malformed_business_date():
@@ -1655,6 +1687,9 @@ sources:
 {{ config(materialized='ephemeral') }}
 
 -- Source text is exposed as raw_*; never alias an expression to an input column name (ClickHouse).
+{% set order_statuses -%}
+    ('created', 'approved', 'invoiced', 'processing', 'shipped', 'delivered', 'canceled', 'unavailable')
+{%- endset %}
 with orders_src as (
     {{ latest_bronze_load('orders') }}
 ),
@@ -1668,7 +1703,16 @@ orders_typed as (
         toDateTimeOrNull(order_estimated_delivery_date) as estimated_delivery_at,
         toDateTimeOrNull(order_delivered_customer_date) as delivered_at,
         _loaded_at as loaded_at,
-        row_number() over (partition by order_id order by order_status, order_purchase_timestamp) as occurrence
+        -- Among copies of one key, a copy that passes its own checks ranks first, so a bad copy can't push out
+        -- a good one; every column then breaks ties, so a rerun keeps the same copy.
+        row_number() over (
+            partition by order_id
+            order by
+                customer_id is null or toDateTimeOrNull(order_purchase_timestamp) is null
+                    or order_status is null or order_status not in {{ order_statuses }},
+                order_status, order_purchase_timestamp, customer_id, order_approved_at,
+                order_delivered_carrier_date, order_delivered_customer_date, order_estimated_delivery_date
+        ) as occurrence
     from orders_src
 )
 
@@ -1680,9 +1724,7 @@ select
         when raw_customer_id is null then 'missing customer_id'
         when purchased_at is null then 'invalid order_purchase_timestamp'
         when raw_order_status is null then 'missing order_status'
-        when raw_order_status not in (
-            'created', 'approved', 'invoiced', 'processing', 'shipped', 'delivered', 'canceled', 'unavailable'
-        ) then 'unknown order_status'
+        when raw_order_status not in {{ order_statuses }} then 'unknown order_status'
     end as failure_reason
 from orders_typed
 ```
@@ -1754,7 +1796,7 @@ git commit -m "feat: Silver Orders with Quarantine in ClickHouse, rerunnable per
 ### Task 7: Silver Order Items, Payments and catalog lookups
 
 **Files:**
-- Create: `dbt/models/silver/products.sql`, `dbt/models/silver/product_categories.sql`, `dbt/models/silver/_checks/order_items_checked.sql`, `dbt/models/silver/_checks/payments_checked.sql`, `dbt/models/silver/order_items.sql`, `dbt/models/silver/payments.sql`, `dbt/tests/silver_order_items_unique.sql`
+- Create: `dbt/models/silver/products.sql`, `dbt/models/silver/product_categories.sql`, `dbt/models/silver/_checks/order_items_checked.sql`, `dbt/models/silver/_checks/payments_checked.sql`, `dbt/models/silver/order_items.sql`, `dbt/models/silver/payments.sql`, `dbt/tests/silver_order_items_unique.sql`, `dbt/tests/silver_payments_unique.sql`
 - Modify: `dbt/models/silver/quarantine.sql`, `dbt/models/silver/_silver.yml`
 - Test: `tests/test_silver_order_items.py`
 
@@ -1787,6 +1829,26 @@ def _item(order_id, item_id, product_id, price, freight="1.00"):
     }
 
 
+def _payment(order_id, sequential, value, payment_type="voucher"):
+    return {
+        "order_id": order_id, "payment_sequential": sequential, "payment_type": payment_type,
+        "payment_installments": "1", "payment_value": value,
+    }
+
+
+def _quarantined(client, entity):
+    return _rows(
+        client,
+        f"select record_key, failure_reason from silver.quarantine where entity = '{entity}' order by record_key",
+    )
+
+
+def _bad_parent_order(add_bronze_rows):
+    add_bronze_rows("orders", [
+        {"order_id": "o9", "customer_id": "c1", "order_status": "delivered", "order_purchase_timestamp": "bad"},
+    ])
+
+
 def test_valid_order_items_reach_silver(bronze_loaded):
     run_step("silver", D)
     assert _rows(
@@ -1805,39 +1867,42 @@ def test_valid_payments_reach_silver(bronze_loaded):
     run_step("silver", D)
     assert _rows(
         bronze_loaded,
-        "select order_id, payment_sequential, payment_type, payment_value from silver.payments "
-        "order by order_id, payment_sequential",
+        "select order_id, payment_sequential, payment_type, payment_installments, payment_value "
+        "from silver.payments order by order_id, payment_sequential",
     ) == [
-        ("o1", 1, "voucher", Decimal("15.00")),
-        ("o1", 2, "credit_card", Decimal("150.00")),
-        ("o2", 1, "credit_card", Decimal("33.00")),
-        ("o3", 1, "boleto", Decimal("22.00")),
+        ("o1", 1, "voucher", 1, Decimal("15.00")),
+        ("o1", 2, "credit_card", 3, Decimal("150.00")),
+        ("o2", 1, "credit_card", 1, Decimal("33.00")),
+        ("o3", 1, "boleto", 1, Decimal("22.00")),
     ]
 
 
 def test_bad_order_items_go_to_quarantine(bronze_loaded, add_bronze_rows):
-    add_bronze_rows("orders", [
-        {"order_id": "o9", "customer_id": "c1", "order_status": "delivered", "order_purchase_timestamp": "bad"},
-    ])
+    _bad_parent_order(add_bronze_rows)
     add_bronze_rows("order_items", [
-        _item("o1", "3", "p404", "12.00"),
-        _item("o3", "2", "p1", "-5.00"),
-        _item("o3", "3", "p1", "abc"),
-        _item("o3", "4", "p1", "9.00", freight="-1.00"),
-        _item("o9", "1", "p1", "9.00"),
-        _item("o77", "1", "p1", "9.00"),
+        _item(None, "1", "p1", "9.00"),
+        _item("o3", "x", "p1", "9.00"),
         _item("o1", "1", "p1", "100.00"),
+        _item("o77", "1", "p1", "9.00"),
+        _item("o9", "1", "p1", "9.00"),
+        _item("o3", "5", None, "9.00"),
+        _item("o1", "3", "p404", "12.00"),
+        _item("o3", "3", "p1", "abc"),
+        _item("o3", "2", "p1", "-5.00"),
+        _item("o3", "6", "p1", "9.00", freight="abc"),
+        _item("o3", "4", "p1", "9.00", freight="-1.00"),
     ])
     run_step("silver", D)
-    assert _rows(
-        bronze_loaded,
-        "select record_key, failure_reason from silver.quarantine where entity = 'order_item' order by record_key",
-    ) == [
+    assert _quarantined(bronze_loaded, "order_item") == [
+        ("?/1", "missing order_id"),
         ("o1/1", "duplicate order item"),
         ("o1/3", "unknown product"),
         ("o3/2", "negative price"),
         ("o3/3", "invalid price"),
         ("o3/4", "negative freight_value"),
+        ("o3/5", "missing product_id"),
+        ("o3/6", "invalid freight_value"),
+        ("o3/x", "invalid order_item_id"),
         ("o77/1", "unknown order"),
         ("o9/1", "parent order quarantined"),
     ]
@@ -1845,24 +1910,34 @@ def test_bad_order_items_go_to_quarantine(bronze_loaded, add_bronze_rows):
 
 
 def test_bad_payments_go_to_quarantine(bronze_loaded, add_bronze_rows):
+    _bad_parent_order(add_bronze_rows)
     add_bronze_rows("order_payments", [
-        {"order_id": "o3", "payment_sequential": "2", "payment_type": "voucher", "payment_installments": "1", "payment_value": "-3.00"},
-        {"order_id": "o3", "payment_sequential": "x", "payment_type": "voucher", "payment_installments": "1", "payment_value": "3.00"},
+        _payment(None, "1", "3.00"),
+        _payment("o3", "x", "3.00"),
+        _payment("o3", "1", "22.00"),  # duplicate; "voucher" sorts after the original "boleto", so this one is dropped
+        _payment("o77", "1", "3.00"),
+        _payment("o9", "1", "3.00"),
+        _payment("o3", "3", "abc"),
+        _payment("o3", "2", "-3.00"),
     ])
     run_step("silver", D)
-    assert _rows(
-        bronze_loaded,
-        "select record_key, failure_reason from silver.quarantine where entity = 'payment' order by record_key",
-    ) == [("o3/2", "negative payment_value"), ("o3/x", "invalid payment_sequential")]
+    assert _quarantined(bronze_loaded, "payment") == [
+        ("?/1", "missing order_id"),
+        ("o3/1", "duplicate payment"),
+        ("o3/2", "negative payment_value"),
+        ("o3/3", "invalid payment_value"),
+        ("o3/x", "invalid payment_sequential"),
+        ("o77/1", "unknown order"),
+        ("o9/1", "parent order quarantined"),
+    ]
+    assert _rows(bronze_loaded, "select count() from silver.payments") == [(4,)]
 
 
 def test_numbers_written_differently_are_still_duplicates(bronze_loaded, add_bronze_rows):
     # "01" and "1" are the same key; letting both through would fail the uniqueness test and the run.
     # The extra rows sort after the originals ("99.00" > "100.00", "16.00" > "15.00" as text), so they are the ones dropped.
     add_bronze_rows("order_items", [_item("o1", "01", "p1", "99.00")])
-    add_bronze_rows("order_payments", [
-        {"order_id": "o1", "payment_sequential": "01", "payment_type": "voucher", "payment_installments": "1", "payment_value": "16.00"},
-    ])
+    add_bronze_rows("order_payments", [_payment("o1", "01", "16.00")])
     run_step("silver", D)
     assert _rows(bronze_loaded, "select count() from silver.order_items where order_id = 'o1'") == [(2,)]
     assert _rows(bronze_loaded, "select count() from silver.payments where order_id = 'o1'") == [(2,)]
@@ -1870,6 +1945,22 @@ def test_numbers_written_differently_are_still_duplicates(bronze_loaded, add_bro
         bronze_loaded,
         "select entity, record_key, failure_reason from silver.quarantine where record_key like 'o1/%' order by entity",
     ) == [("order_item", "o1/01", "duplicate order item"), ("payment", "o1/01", "duplicate payment")]
+
+
+def test_valid_copies_win_over_invalid_duplicates(bronze_loaded, add_bronze_rows):
+    # "-5.00" and "-1.00" sort before the valid values; if the bad copies ranked first, the valid ones would be lost.
+    add_bronze_rows("order_items", [_item("o1", "1", "p1", "-5.00")])
+    add_bronze_rows("order_payments", [_payment("o1", "1", "-1.00")])
+    run_step("silver", D)
+    assert _rows(bronze_loaded, "select price from silver.order_items where order_id = 'o1' and order_item_id = 1") == [
+        (Decimal("100.00"),)
+    ]
+    assert _rows(
+        bronze_loaded, "select payment_value from silver.payments where order_id = 'o1' and payment_sequential = 1"
+    ) == [(Decimal("15.00"),)]
+    assert _rows(
+        bronze_loaded, "select entity, record_key, failure_reason from silver.quarantine order by entity"
+    ) == [("order_item", "o1/1", "duplicate order item"), ("payment", "o1/1", "duplicate payment")]
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -1947,8 +2038,17 @@ items_typed as (
         toDecimal64OrNull(price, 2) as price_amount,
         toDecimal64OrNull(freight_value, 2) as freight_amount,
         _loaded_at as loaded_at,
-        -- Duplicates are judged on the parsed number, so "01" and "1" are the same Order Item.
-        row_number() over (partition by order_id, toInt32OrNull(order_item_id) order by product_id, price) as occurrence
+        -- Duplicates are judged on the parsed number, so "01" and "1" are the same Order Item. A copy that
+        -- passes its own checks ranks first (the Order and Product lookups come later); every column then
+        -- breaks ties, so a rerun keeps the same copy.
+        row_number() over (
+            partition by order_id, toInt32OrNull(order_item_id)
+            order by
+                product_id is null
+                    or toDecimal64OrNull(price, 2) is null or toDecimal64OrNull(price, 2) < 0
+                    or toDecimal64OrNull(freight_value, 2) is null or toDecimal64OrNull(freight_value, 2) < 0,
+                product_id, price, freight_value, seller_id, shipping_limit_date, order_item_id
+        ) as occurrence
     from items_src
 ),
 
@@ -1995,9 +2095,13 @@ payments_typed as (
         toInt32OrNull(payment_installments) as installments,
         toDecimal64OrNull(payment_value, 2) as amount,
         _loaded_at as loaded_at,
-        -- Duplicates are judged on the parsed number, so "01" and "1" are the same Payment.
+        -- Duplicates are judged on the parsed number, so "01" and "1" are the same Payment. A copy that
+        -- passes its own checks ranks first; every column then breaks ties, so a rerun keeps the same copy.
         row_number() over (
-            partition by order_id, toInt32OrNull(payment_sequential) order by payment_type, payment_value
+            partition by order_id, toInt32OrNull(payment_sequential)
+            order by
+                toDecimal64OrNull(payment_value, 2) is null or toDecimal64OrNull(payment_value, 2) < 0,
+                payment_type, payment_value, payment_installments, payment_sequential
         ) as occurrence
     from payments_src
 ),
@@ -2122,6 +2226,14 @@ Append to `dbt/models/silver/_silver.yml` under `models:`:
 select order_id, order_item_id
 from {{ ref('order_items') }}
 group by order_id, order_item_id
+having count() > 1
+```
+
+`dbt/tests/silver_payments_unique.sql`:
+```sql
+select order_id, payment_sequential
+from {{ ref('payments') }}
+group by order_id, payment_sequential
 having count() > 1
 ```
 
@@ -2254,6 +2366,19 @@ def test_product_dropped_from_the_catalog_keeps_its_revenue(bronze_loaded, catal
         ("Uncategorized", Decimal("70.00"), 2, 2),  # o3's 20.00 is still counted
         ("toys", Decimal("100.00"), 1, 1),
     ]
+
+
+def test_quarantined_rows_do_not_change_revenue(bronze_loaded, add_bronze_rows):
+    _run_all(D)
+    first = _revenue(bronze_loaded)
+    add_bronze_rows("order_items", [
+        {"order_id": "o3", "order_item_id": "2", "product_id": "p1", "seller_id": "s1",
+         "shipping_limit_date": "2017-11-30 10:00:00", "price": "-5.00", "freight_value": "1.00"},
+    ])
+    for step in STEPS[1:]:  # rerun from Silver on the same Bronze load
+        run_step(step, D)
+    assert _rows(bronze_loaded, "select count() from silver.quarantine") == [(1,)]
+    assert _revenue(bronze_loaded) == first
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
