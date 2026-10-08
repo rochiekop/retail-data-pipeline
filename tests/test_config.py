@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import psycopg
+import pytest
 
 from pipeline import config
 from pipeline.warehouse import connect
@@ -32,3 +33,9 @@ def test_warehouse_reachable():
 def test_olist_dir_defaults_to_raw_downloads(monkeypatch):
     monkeypatch.delenv("OLIST_DIR", raising=False)
     assert config.olist_dir() == Path("data/olist/raw")
+
+
+def test_missing_password_names_the_variable_and_the_env_file(monkeypatch):
+    monkeypatch.delenv("SHOP_DB_PASSWORD", raising=False)
+    with pytest.raises(RuntimeError, match=r"SHOP_DB_PASSWORD.*\.env"):
+        config.shop_db()
