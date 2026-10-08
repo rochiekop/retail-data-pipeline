@@ -19,7 +19,7 @@ def _run(*dates):
 
 def test_gold_matches_the_shop_database(bronze_loaded):
     _run(D, D2)
-    assert reconcile(D, D2) == Reconciliation(Decimal("240.00"), Decimal("240.00"))
+    assert reconcile(D, D2) == Reconciliation(Decimal("240.00"), Decimal("240.00"), 0)
     assert main(["--from", "2017-11-24", "--to", "2017-11-25"]) == 0
 
 
@@ -37,4 +37,16 @@ def test_unavailable_orders_are_not_revenue(bronze_loaded):
             "insert into shop.order_items values ('o5', 1, 'p1', 's1', '2017-11-30 12:00:00', 40.00, 4.00)"
         )
     _run(D, D2)
-    assert reconcile(D, D2) == Reconciliation(Decimal("240.00"), Decimal("240.00"))
+    assert reconcile(D, D2) == Reconciliation(Decimal("240.00"), Decimal("240.00"), 0)
+
+
+def test_quarantined_rows_are_reported(bronze_loaded, add_bronze_rows, capsys):
+    _run(D, D2)
+    add_bronze_rows("orders", [
+        {"order_id": "o9", "customer_id": "c1", "order_status": "delivered", "order_purchase_timestamp": "bad"},
+    ])
+    for step in STEPS[1:]:  # rerun from Silver on the same Bronze load
+        run_step(step, D)
+    assert reconcile(D, D2) == Reconciliation(Decimal("240.00"), Decimal("240.00"), 1)
+    assert main(["--from", "2017-11-24", "--to", "2017-11-25"]) == 0
+    assert "Quarantined rows:      1" in capsys.readouterr().out

@@ -12,8 +12,19 @@ def _orders(client):
     ).result_rows
 
 
-def _order(order_id, status="delivered", purchased="2017-11-24 09:00:00"):
-    return {"order_id": order_id, "customer_id": "c1", "order_status": status, "order_purchase_timestamp": purchased}
+def _quarantine(client):
+    return client.query(
+        "select entity, record_key, failure_reason from silver.quarantine "
+        "where business_date = {d:Date} order by record_key, failure_reason",
+        parameters={"d": D},
+    ).result_rows
+
+
+def _order(order_id, status="delivered", purchased="2017-11-24 09:00:00", customer_id="c1"):
+    return {
+        "order_id": order_id, "customer_id": customer_id, "order_status": status,
+        "order_purchase_timestamp": purchased,
+    }
 
 
 def test_valid_orders_reach_silver(bronze_loaded):
@@ -24,6 +35,7 @@ def test_valid_orders_reach_silver(bronze_loaded):
         ("o3", "delivered", "2017-11-24 23:59:59"),
         ("o5", "unavailable", "2017-11-24 12:00:00"),
     ]
+    assert _quarantine(bronze_loaded) == []
 
 
 def test_rows_added_to_the_latest_load_reach_silver(bronze_loaded, add_bronze_rows):
@@ -33,17 +45,36 @@ def test_rows_added_to_the_latest_load_reach_silver(bronze_loaded, add_bronze_ro
     assert "o6" in [r[0] for r in _orders(bronze_loaded)]
 
 
-def test_bad_orders_are_left_out_of_silver(bronze_loaded, add_bronze_rows):
+def test_bad_orders_go_to_quarantine(bronze_loaded, add_bronze_rows):
     add_bronze_rows(
         "orders",
         [
+            _order(None),
             _order("o9", purchased="not-a-date"),
             _order("o8", status="teleported"),
+            _order("o7", status=None),
+            _order("o6", customer_id=None),
             _order("o1", purchased="2017-11-24 10:00:00"),
         ],
     )
     run_step("silver", D)
+    assert _quarantine(bronze_loaded) == [
+        ("order", "(missing)", "missing order_id"),
+        ("order", "o1", "duplicate order_id"),
+        ("order", "o6", "missing customer_id"),
+        ("order", "o7", "missing order_status"),
+        ("order", "o8", "unknown order_status"),
+        ("order", "o9", "invalid order_purchase_timestamp"),
+    ]
     assert [r[0] for r in _orders(bronze_loaded)] == ["o1", "o2", "o3", "o5"]
+
+
+def test_a_valid_copy_wins_over_an_invalid_duplicate(bronze_loaded, add_bronze_rows):
+    # "approved" sorts before "delivered"; if the bad copy ranked first, o1 would leave Silver entirely.
+    add_bronze_rows("orders", [_order("o1", status="approved", purchased="bad")])
+    run_step("silver", D)
+    assert _orders(bronze_loaded)[0] == ("o1", "delivered", "2017-11-24 10:00:00")
+    assert _quarantine(bronze_loaded) == [("order", "o1", "duplicate order_id")]
 
 
 def test_silver_reads_only_the_latest_load(bronze_loaded, add_bronze_rows):
@@ -51,6 +82,16 @@ def test_silver_reads_only_the_latest_load(bronze_loaded, add_bronze_rows):
     run_step("bronze", D)  # a new, clean load of the same Business Date
     run_step("silver", D)
     assert [r[0] for r in _orders(bronze_loaded)] == ["o1", "o2", "o3", "o5"]
+
+
+def test_rerun_after_source_fix_clears_quarantine(bronze_loaded, add_bronze_rows):
+    add_bronze_rows("orders", [_order("o9", purchased="bad")])
+    run_step("silver", D)
+    assert len(_quarantine(bronze_loaded)) == 1
+
+    run_step("bronze", D)  # a new, clean load of the same Business Date
+    run_step("silver", D)
+    assert _quarantine(bronze_loaded) == []
 
 
 def test_rerun_replaces_the_business_date(bronze_loaded):

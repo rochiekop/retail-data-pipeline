@@ -14,8 +14,17 @@ items_typed as (
         toDecimal64OrNull(price, 2) as price_amount,
         toDecimal64OrNull(freight_value, 2) as freight_amount,
         _loaded_at as loaded_at,
-        -- Duplicates are judged on the parsed number, so "01" and "1" are the same Order Item.
-        row_number() over (partition by order_id, toInt32OrNull(order_item_id) order by product_id, price) as occurrence
+        -- Duplicates are judged on the parsed number, so "01" and "1" are the same Order Item. A copy that
+        -- passes its own checks ranks first (the Order and Product lookups come later); every column then
+        -- breaks ties, so a rerun keeps the same copy.
+        row_number() over (
+            partition by order_id, toInt32OrNull(order_item_id)
+            order by
+                product_id is null
+                    or toDecimal64OrNull(price, 2) is null or toDecimal64OrNull(price, 2) < 0
+                    or toDecimal64OrNull(freight_value, 2) is null or toDecimal64OrNull(freight_value, 2) < 0,
+                product_id, price, freight_value, seller_id, shipping_limit_date, order_item_id
+        ) as occurrence
     from items_src
 ),
 

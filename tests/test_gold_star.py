@@ -95,3 +95,16 @@ def test_product_dropped_from_the_catalog_keeps_its_revenue(bronze_loaded, catal
         ("Uncategorized", Decimal("70.00"), 2, 2),  # o3's 20.00 is still counted
         ("toys", Decimal("100.00"), 1, 1),
     ]
+
+
+def test_quarantined_rows_do_not_change_revenue(bronze_loaded, add_bronze_rows):
+    _run_all(D)
+    first = _revenue(bronze_loaded)
+    add_bronze_rows("order_items", [
+        {"order_id": "o3", "order_item_id": "2", "product_id": "p1", "seller_id": "s1",
+         "shipping_limit_date": "2017-11-30 10:00:00", "price": "-5.00", "freight_value": "1.00"},
+    ])
+    for step in STEPS[1:]:  # rerun from Silver on the same Bronze load
+        run_step(step, D)
+    assert _rows(bronze_loaded, "select count() from silver.quarantine") == [(1,)]
+    assert _revenue(bronze_loaded) == first
