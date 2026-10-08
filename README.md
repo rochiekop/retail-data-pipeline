@@ -4,6 +4,10 @@ An end-to-end ELT learning pipeline for an e-commerce business (Olist). The voca
 
 Shop Database (Postgres) + Merchandising Catalog (Excel) → **Bronze** → **Silver** (+ Quarantine) → **Gold** star schema, all in ClickHouse, one Business Date per run, orchestrated by Airflow.
 
+![Daily Orders pipeline: seven numbered steps with the tools each uses](docs/pipeline-flow.svg)
+
+Airflow runs the daily steps at 00:00 WIB (Asia/Jakarta). The Business Date is still the calendar day of each Order's purchase timestamp as stored (São Paulo time); the schedule's timezone only decides when runs fire. A walkthrough of one Business Date through every layer is in [docs/pipeline-flow.html](docs/pipeline-flow.html).
+
 ## Setup
 
 Download https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce into `data/olist/raw/` first (on Linux, `docker compose up` would otherwise create `data/` owned by root). Then:
@@ -24,7 +28,7 @@ docker compose exec airflow airflow pools set dimensions 1 "Rebuild Gold dimensi
 - Without Airflow: `.venv/Scripts/python -m pipeline.run --business-date 2017-11-24 --step all`
 - Backfill (run one date first so the tables exist, and unpause the DAG: backfill runs stay queued while it is paused):
   `docker compose exec airflow airflow dags unpause daily_orders`, then
-  `docker compose exec airflow airflow backfill create --dag-id daily_orders --from-date 2016-09-04 --to-date 2018-10-18 --max-active-runs 4`
+  `docker compose exec airflow airflow backfill create --dag-id daily_orders --from-date 2016-09-03 --to-date 2018-10-17 --max-active-runs 4`
 - Watch runs in the Airflow UI: http://localhost:8080
 - Check Gold against the source: `.venv/Scripts/python -m pipeline.reconcile --from 2016-09-04 --to 2018-10-17`
 - Prove a rerun changes nothing (run it after any backfill finishes; `dags test` ignores the `dimensions` pool):

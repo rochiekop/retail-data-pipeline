@@ -50,7 +50,7 @@ header { display: grid; gap: 10px; }
 section { display: grid; gap: 16px; }
 
 .diagram { overflow-x: auto; background: var(--surface); border: 1px solid color-mix(in srgb, var(--line) 35%, transparent); border-radius: 10px; }
-.diagram svg { display: block; min-width: 940px; width: 100%; height: auto; }
+.diagram img { display: block; min-width: 940px; width: 100%; height: auto; }
 svg text { font-family: var(--font-body); fill: var(--fg); }
 svg .mono { font-family: var(--font-mono); font-size: 11.5px; fill: var(--muted); }
 svg .title { font-family: var(--font-display); font-weight: 700; font-size: 15px; }
@@ -105,150 +105,17 @@ code { font-family: var(--font-mono); font-size: 0.85em; }
   <header>
     <div class="eyebrow">retail-data-pipeline · slice 1 · ELT</div>
     <h1>Daily Orders Pipeline</h1>
-    <p class="lede">How one Business Date moves from the Olist shop into a ClickHouse star schema. Postgres and Excel are the sources. Python extracts and loads them unchanged into Bronze, and dbt transforms Bronze into Silver and Gold inside the warehouse. Airflow runs the four steps in order. Kafka is designed in but arrives in a later slice.</p>
+    <p class="lede">How one Business Date moves from the Olist shop into a ClickHouse star schema. Postgres and Excel are the sources. Python extracts and loads them unchanged into Bronze, and dbt transforms Bronze into Silver and Gold inside the warehouse. Airflow runs the four daily steps in order, at midnight Indonesia Western Time (WIB). Kafka is designed in but arrives in a later slice.</p>
   </header>
 
   <section aria-labelledby="arch">
-    <h2 id="arch">Architecture</h2>
+    <h2 id="arch">Pipeline, step by step</h2>
     <div class="diagram">
-      <svg viewBox="0 0 1080 600" role="img" aria-label="Pipeline diagram: Shop Database and Merchandising Catalog feed Python extract and load into ClickHouse Bronze, dbt builds Silver with a Quarantine and a Gold star schema, consumed by analysts, dashboards and ML. Airflow orchestrates bronze, silver, facts, dimensions. Kafka is a later addition feeding Bronze.">
-        <defs>
-          <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-            <path d="M0,0 L10,5 L0,10 z" class="arrowhead"/>
-          </marker>
-        </defs>
-
-        <!-- Airflow lane -->
-        <rect x="360" y="16" width="700" height="58" rx="8" class="chip"/>
-        <text x="378" y="41" class="title">Airflow</text>
-        <text x="378" y="59" class="mono">daily_orders</text>
-        <rect x="470" y="31" width="120" height="28" rx="14" class="chip"/>
-        <text x="530" y="50" text-anchor="middle" class="mono">bronze</text>
-        <rect x="614" y="31" width="120" height="28" rx="14" class="chip"/>
-        <text x="674" y="50" text-anchor="middle" class="mono">silver</text>
-        <rect x="758" y="31" width="120" height="28" rx="14" class="chip"/>
-        <text x="818" y="50" text-anchor="middle" class="mono">facts</text>
-        <rect x="902" y="31" width="140" height="28" rx="14" class="chip"/>
-        <text x="972" y="50" text-anchor="middle" class="mono">dimensions (1 slot)</text>
-        <path d="M590 45 H612" class="edge" marker-end="url(#arrow)"/>
-        <path d="M734 45 H756" class="edge" marker-end="url(#arrow)"/>
-        <path d="M878 45 H900" class="edge" marker-end="url(#arrow)"/>
-
-        <!-- Sources -->
-        <text x="20" y="112" class="label">SOURCES</text>
-        <rect x="20" y="124" width="170" height="70" rx="8" class="src"/>
-        <text x="34" y="150" class="title">Shop Database</text>
-        <text x="34" y="170" class="mono">Postgres · OLTP</text>
-        <text x="34" y="185" class="mono">orders, items, payments</text>
-
-        <rect x="20" y="214" width="170" height="70" rx="8" class="src"/>
-        <text x="34" y="240" class="title">Merch. Catalog</text>
-        <text x="34" y="260" class="mono">Excel workbook</text>
-        <text x="34" y="275" class="mono">products, translations</text>
-
-        <rect x="20" y="330" width="170" height="70" rx="8" class="src later"/>
-        <text x="34" y="356" class="title">Kafka</text>
-        <text x="34" y="376" class="mono">later slice</text>
-        <text x="34" y="391" class="mono">orders, reviews topics</text>
-
-        <!-- Extract + load -->
-        <rect x="216" y="160" width="118" height="90" rx="8" class="src"/>
-        <text x="275" y="190" text-anchor="middle" class="title">Python</text>
-        <text x="275" y="210" text-anchor="middle" class="mono">extract + load</text>
-        <text x="275" y="228" text-anchor="middle" class="mono">bronze.py</text>
-        <path d="M190 160 L214 182" class="edge" marker-end="url(#arrow)"/>
-        <path d="M190 248 L214 228" class="edge" marker-end="url(#arrow)"/>
-
-        <!-- Warehouse -->
-        <rect x="360" y="96" width="700" height="392" rx="10" class="wh"/>
-        <text x="378" y="122" class="title">ClickHouse warehouse</text>
-        <text x="580" y="122" class="mono">OLAP · columnar · MergeTree</text>
-
-        <!-- Bronze -->
-        <rect x="378" y="140" width="150" height="190" rx="8" class="bronze"/>
-        <text x="392" y="164" class="title tag-bronze">Bronze</text>
-        <text x="392" y="182" class="mono">every column as text</text>
-        <text x="392" y="196" class="mono">every load kept</text>
-        <text x="392" y="222" class="mono">orders</text>
-        <text x="392" y="238" class="mono">order_items</text>
-        <text x="392" y="254" class="mono">order_payments</text>
-        <text x="392" y="270" class="mono">products</text>
-        <text x="392" y="286" class="mono">category_translation</text>
-        <text x="392" y="314" class="mono">+ _business_date, _loaded_at</text>
-        <path d="M334 205 H376" class="edge" marker-end="url(#arrow)"/>
-
-        <!-- Kafka later edge -->
-        <path d="M190 365 H452 V332" class="edge later" marker-end="url(#arrow)"/>
-        <text x="236" y="357" class="mono">Kafka engine</text>
-
-        <!-- Silver -->
-        <path d="M528 222 H566" class="edge" marker-end="url(#arrow)"/>
-        <text x="547" y="214" text-anchor="middle" class="mono">dbt</text>
-        <rect x="568" y="140" width="160" height="190" rx="8" class="silver"/>
-        <text x="582" y="164" class="title tag-silver">Silver</text>
-        <text x="582" y="182" class="mono">typed, deduplicated</text>
-        <text x="582" y="196" class="mono">checked</text>
-        <text x="582" y="222" class="mono">orders</text>
-        <text x="582" y="238" class="mono">order_items</text>
-        <text x="582" y="254" class="mono">payments</text>
-        <text x="582" y="314" class="mono">partition = business_date</text>
-
-        <rect x="568" y="372" width="160" height="88" rx="8" class="bad"/>
-        <text x="582" y="396" class="title tag-bad">Quarantine</text>
-        <text x="582" y="414" class="mono">failed rows + reason</text>
-        <text x="582" y="430" class="mono">points back to Bronze</text>
-        <path d="M648 330 V370" class="edge" marker-end="url(#arrow)"/>
-        <text x="656" y="356" class="mono">bad rows</text>
-
-        <!-- Gold -->
-        <path d="M728 222 H766" class="edge" marker-end="url(#arrow)"/>
-        <text x="747" y="214" text-anchor="middle" class="mono">dbt</text>
-        <rect x="768" y="140" width="276" height="330" rx="8" class="gold"/>
-        <text x="782" y="164" class="title tag-gold">Gold · star schema</text>
-
-        <rect x="782" y="182" width="118" height="44" rx="6" class="node"/>
-        <text x="841" y="202" text-anchor="middle" class="mono">dim_product</text>
-        <text x="841" y="217" text-anchor="middle" class="mono">+ category</text>
-        <rect x="912" y="182" width="118" height="44" rx="6" class="node"/>
-        <text x="971" y="202" text-anchor="middle" class="mono">dim_date</text>
-        <text x="971" y="217" text-anchor="middle" class="mono">calendar</text>
-
-        <rect x="826" y="262" width="160" height="50" rx="6" class="node" style="stroke-width:2"/>
-        <text x="906" y="284" text-anchor="middle" class="mono" style="fill:var(--fg)">fact_order_items</text>
-        <text x="906" y="300" text-anchor="middle" class="mono">grain: Order Item</text>
-        <path d="M841 226 L880 260" class="edge"/>
-        <path d="M971 226 L932 260" class="edge"/>
-
-        <text x="906" y="336" text-anchor="middle" class="mono">later: dim_customer, dim_seller</text>
-
-        <rect x="796" y="358" width="220" height="50" rx="6" class="node" style="stroke-dasharray:4 3"/>
-        <text x="906" y="380" text-anchor="middle" class="mono" style="fill:var(--fg)">daily_revenue_by_category</text>
-        <text x="906" y="396" text-anchor="middle" class="mono">view over the star</text>
-        <path d="M906 312 V356" class="edge" marker-end="url(#arrow)"/>
-        <text x="906" y="450" text-anchor="middle" class="mono">facts: partition = business_date</text>
-
-        <!-- Consumers -->
-        <text x="768" y="522" class="label">CONSUMERS</text>
-        <path d="M906 470 V500 M820 500 H992 M820 500 V530 M906 500 V530 M992 500 V530" class="edge"/>
-        <rect x="779" y="532" width="82" height="44" rx="8" class="src"/>
-        <text x="820" y="559" text-anchor="middle" class="mono">Analysts</text>
-        <rect x="865" y="532" width="82" height="44" rx="8" class="src"/>
-        <text x="906" y="559" text-anchor="middle" class="mono">Dashboard</text>
-        <rect x="951" y="532" width="82" height="44" rx="8" class="src"/>
-        <text x="992" y="559" text-anchor="middle" class="mono">ML features</text>
-
-        <!-- Reconcile -->
-        <rect x="378" y="380" width="160" height="80" rx="8" class="src"/>
-        <text x="392" y="404" class="title">Reconcile</text>
-        <text x="392" y="422" class="mono">Gold Revenue vs</text>
-        <text x="392" y="438" class="mono">Shop Database</text>
-        <text x="392" y="452" class="mono">MATCH / MISMATCH</text>
-      </svg>
+      <img src="pipeline-flow.svg" width="1200" height="610" alt="Seven numbered steps: 1 download the Olist CSVs from Kaggle; 2 seed the Postgres Shop Database and the Excel Merchandising Catalog with Python; then, orchestrated daily by Airflow at 00:00 WIB: 3 Python loads Bronze in ClickHouse, 4 dbt builds Silver and sends bad rows to the Quarantine, 5 dbt builds the Gold fact, 6 dbt rebuilds the Gold dimensions and the daily Revenue view; 7 reconcile compares Gold Revenue with the Shop Database.">
     </div>
     <div class="legend">
-      <span><i class="swatch"></i>built in slice 1</span>
-      <span><i class="swatch later"></i>later slice</span>
-      <span>Rerunning a Business Date drops its partitions and rebuilds them, so a rerun changes nothing.</span>
+      <span>Steps 3 to 6 run once per Business Date. Rerunning a date drops its partitions and rebuilds them, so a rerun changes nothing.</span>
+      <span>Kafka (Orders and Reviews topics into Bronze) arrives in a later slice.</span>
     </div>
   </section>
 
