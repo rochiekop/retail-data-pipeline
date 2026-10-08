@@ -16,4 +16,4 @@
 
 **How to check it yourself:**
 - Tests: `.venv/Scripts/python -m pytest tests/test_seed_shop_db.py -v` shows 5 passed
-- Real data, optional at this point: download Olist into `data/olist/`, then run `.venv/Scripts/python -m pipeline.seed shop-db`. Expect about `orders: 99441, order_items: 112650, order_payments: 103886`.
+- Real data, optional at this point: download Olist into `data/olist/raw/`, then run `.venv/Scripts/python -m pipeline.seed shop-db`. Expect about `orders: 99441, order_items: 112650, order_payments: 103886`.

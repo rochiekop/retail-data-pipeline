@@ -40,7 +40,7 @@ def warehouse() -> Db:
 
 
 def olist_dir() -> Path:
-    return Path(os.getenv("OLIST_DIR", "data/olist"))
+    return Path(os.getenv("OLIST_DIR", "data/olist/raw"))
 
 
 def catalog_path() -> Path:

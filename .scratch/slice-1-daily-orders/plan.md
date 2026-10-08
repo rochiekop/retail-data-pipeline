@@ -305,7 +305,7 @@ def warehouse() -> Db:
 
 
 def olist_dir() -> Path:
-    return Path(os.getenv("OLIST_DIR", "data/olist"))
+    return Path(os.getenv("OLIST_DIR", "data/olist/raw"))
 
 
 def catalog_path() -> Path:
@@ -2443,7 +2443,7 @@ If `airflow.providers.standard` or `airflow.sdk` fails to import, check the inst
 
 - [ ] **Step 5: Load the real Olist data (done criterion 2)**
 
-1. Download the dataset from https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce and unzip all 9 CSVs into `data/olist/`.
+1. Download the dataset from https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce and unzip all 9 CSVs into `data/olist/raw/`.
 2. From the host:
 ```bash
 .venv/Scripts/python -m pipeline.seed shop-db
@@ -2505,7 +2505,7 @@ docker compose up -d --build
 docker compose exec airflow airflow pools set dimensions 1 "Rebuild Gold dimensions one run at a time"
 ```
 
-Download https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce into `data/olist/`, then:
+Download https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce into `data/olist/raw/`, then:
 
 ```bash
 .venv/Scripts/python -m pipeline.seed shop-db

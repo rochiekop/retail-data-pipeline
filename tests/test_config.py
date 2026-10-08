@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import psycopg
 
 from pipeline import config
@@ -25,3 +27,8 @@ def test_warehouse_reachable():
     client = connect()
     assert client.command("select 1") == 1
     client.close()
+
+
+def test_olist_dir_defaults_to_raw_downloads(monkeypatch):
+    monkeypatch.delenv("OLIST_DIR", raising=False)
+    assert config.olist_dir() == Path("data/olist/raw")

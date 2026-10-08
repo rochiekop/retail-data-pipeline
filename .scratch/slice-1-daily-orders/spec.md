@@ -18,7 +18,7 @@ Merchandising Catalog ────┘                            └────
 ## Decisions
 
 - **Process:** ELT. Data lands unchanged in Bronze, and every transformation runs as SQL in the warehouse (dbt).
-- **Dataset:** Olist Brazilian E-commerce (Kaggle `olistbr/brazilian-ecommerce`), downloaded manually to `data/olist/`.
+- **Dataset:** Olist Brazilian E-commerce (Kaggle `olistbr/brazilian-ecommerce`), downloaded manually to `data/olist/raw/`.
 - **Shop Database:** Postgres, seeded from the Olist CSVs (orders, order items, payments, customers, sellers, reviews) into schema `shop` with proper types.
 - **Merchandising Catalog:** one Excel workbook generated from the Olist products and category-translation CSVs, with sheets `products` and `category_translation`.
 - **Warehouse:** ClickHouse with databases `bronze`, `silver`, `gold`. MergeTree tables.
