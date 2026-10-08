@@ -27,6 +27,47 @@ services:
     <<: *clickhouse
     ports: ["8124:8123"]
 
+  airflow-db:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes: [airflow-data:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 5s
+      retries: 12
+
+  airflow:
+    build:
+      context: .
+      dockerfile: airflow/Dockerfile
+    command: standalone
+    restart: unless-stopped
+    depends_on:
+      airflow-db: {condition: service_healthy}
+      shop-db: {condition: service_started}
+      warehouse: {condition: service_started}
+    ports: ["8080:8080"]
+    environment:
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-db/airflow
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+      AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_ALL_ADMINS: "True"
+      SHOP_DB_HOST: shop-db
+      SHOP_DB_PORT: "5432"
+      WAREHOUSE_HOST: warehouse
+      WAREHOUSE_PORT: "8123"
+      CATALOG_PATH: /opt/pipeline/data/catalog/merchandising_catalog.xlsx
+      DBT_DIR: /opt/pipeline/dbt
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./src:/opt/pipeline/src
+      - ./dbt:/opt/pipeline/dbt
+      - ./data:/opt/pipeline/data
+
 volumes:
   shop-data:
   warehouse-data:
+  airflow-data:
