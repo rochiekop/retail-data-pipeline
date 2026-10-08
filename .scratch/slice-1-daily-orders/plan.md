@@ -2093,6 +2093,16 @@ from {{ ref('payments_checked') }}
 where failure_reason is not null
 ```
 
+**Step 5b (ticket 08): report Quarantine rows in the reconcile command.** The Quarantine table doesn't exist before ticket 08, so Task 9 ships without this. In `src/pipeline/reconcile.py`, add:
+```python
+QUARANTINED_ROWS = """
+    select count()
+    from silver.quarantine
+    where business_date between {start:Date} and {end:Date}
+"""
+```
+give `Reconciliation` a third field `quarantined_rows: int`, query it in `reconcile` with the same `start`/`end` parameters as `GOLD_REVENUE`, and print `Quarantined rows:      {result.quarantined_rows}` before MATCH/MISMATCH. In `tests/test_reconcile.py` the expected value becomes `Reconciliation(Decimal("240.00"), Decimal("240.00"), 0)`.
+
 Append to `dbt/models/silver/_silver.yml` under `models:`:
 ```yaml
   - name: order_items
@@ -2149,6 +2159,8 @@ git commit -m "feat: Silver Order Items and Payments with Quarantine checks"
 ```python
 from datetime import date
 from decimal import Decimal
+
+from openpyxl import load_workbook
 
 from pipeline.run import STEPS, run_step
 from tests.conftest import BUSINESS_DATE as D
@@ -2228,6 +2240,20 @@ def test_each_business_date_is_independent(bronze_loaded):
     _run_all(date(2017, 11, 25))
     assert _revenue(bronze_loaded, date(2017, 11, 25)) == [("toys", Decimal("70.00"), 1, 1)]
     assert _revenue(bronze_loaded) == first
+
+
+def test_product_dropped_from_the_catalog_keeps_its_revenue(bronze_loaded, catalog_file):
+    _run_all(D)
+    workbook = load_workbook(catalog_file)
+    workbook["products"].delete_rows(4)  # p3 (pc_gamer) leaves the catalog
+    workbook.save(catalog_file)
+    later = date(2017, 11, 25)
+    run_step("bronze", later)  # loads the edited catalog
+    run_step("dimensions", later)  # rebuilds dim_product without p3
+    assert _revenue(bronze_loaded) == [
+        ("Uncategorized", Decimal("70.00"), 2, 2),  # o3's 20.00 is still counted
+        ("toys", Decimal("100.00"), 1, 1),
+    ]
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -2252,12 +2278,12 @@ select
     price,
     freight,
     order_status not in ('canceled', 'unavailable') as counts_as_revenue
-from {{ ref('order_items') }}
+from {{ ref('order_items') }} as fact_items
 inner join (
     select business_date, order_id, order_status
     from {{ ref('orders') }}
     where business_date = {{ business_date() }}
-) using (business_date, order_id)
+) as fact_orders using (business_date, order_id)
 where business_date = {{ business_date() }}
 ```
 
@@ -2297,16 +2323,28 @@ from numbers(toUInt64(dateDiff('day', toDate('2016-01-01'), toDate('2018-12-31')
 {{ config(materialized='view') }}
 
 -- A view over the star, so it always reflects the current catalog (no category history).
+-- Left join: a Product that has since left the catalog keeps its Revenue, as Uncategorized.
+-- The category is renamed in the outer select: aliasing coalesce(product_category, ...) to its own
+-- input name would break the ClickHouse alias rule.
 select
     business_date,
-    product_category,
-    sum(price) as revenue,
-    uniqExact(order_id) as order_count,
-    count() as order_item_count
-from {{ ref('fact_order_items') }}
-inner join {{ ref('dim_product') }} using (product_id)
-where counts_as_revenue = 1
-group by business_date, product_category
+    report_category as product_category,
+    revenue,
+    order_count,
+    order_item_count
+from (
+    select
+        business_date,
+        -- A view runs with its reader's settings, so a join miss may be '' rather than NULL.
+        coalesce(nullIf(product_category, ''), 'Uncategorized') as report_category,
+        sum(price) as revenue,
+        uniqExact(order_id) as order_count,
+        count() as order_item_count
+    from {{ ref('fact_order_items') }} as report_items
+    left join {{ ref('dim_product') }} as report_products using (product_id)
+    where counts_as_revenue = 1
+    group by business_date, report_category
+) as report_totals
 ```
 
 `dbt/models/gold/_gold.yml`:
@@ -2365,8 +2403,8 @@ git commit -m "feat: Gold star schema (fact_order_items, dim_product, dim_date) 
 - Test: `tests/test_reconcile.py`
 
 **Interfaces:**
-- Consumes: Postgres `shop.orders` and `shop.order_items`; ClickHouse `gold.daily_revenue_by_category` and `silver.quarantine`
-- Produces: `reconcile.Reconciliation` (frozen dataclass: `source_revenue: Decimal, gold_revenue: Decimal, quarantined_rows: int`, property `matches -> bool`); `reconcile.reconcile(start: date, end: date) -> Reconciliation`; `reconcile.main(argv: list[str] | None = None) -> int` (0 when Revenue matches, otherwise 1); CLI `--from YYYY-MM-DD --to YYYY-MM-DD`
+- Consumes: Postgres `shop.orders` and `shop.order_items`; ClickHouse `gold.daily_revenue_by_category` (`silver.quarantine` is added in ticket 08, see Task 7 Step 5b)
+- Produces: `reconcile.Reconciliation` (frozen dataclass: `source_revenue: Decimal, gold_revenue: Decimal`, property `matches -> bool`; ticket 08 adds `quarantined_rows: int`); `reconcile.reconcile(start: date, end: date) -> Reconciliation`; `reconcile.main(argv: list[str] | None = None) -> int` (0 when Revenue matches, otherwise 1); CLI `--from YYYY-MM-DD --to YYYY-MM-DD`
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2375,6 +2413,9 @@ git commit -m "feat: Gold star schema (fact_order_items, dim_product, dim_date) 
 from datetime import date
 from decimal import Decimal
 
+import psycopg
+
+from pipeline import config
 from pipeline.reconcile import Reconciliation, main, reconcile
 from pipeline.run import STEPS, run_step
 from tests.conftest import BUSINESS_DATE as D
@@ -2390,7 +2431,7 @@ def _run(*dates):
 
 def test_gold_matches_the_shop_database(bronze_loaded):
     _run(D, D2)
-    assert reconcile(D, D2) == Reconciliation(Decimal("240.00"), Decimal("240.00"), 0)
+    assert reconcile(D, D2) == Reconciliation(Decimal("240.00"), Decimal("240.00"))
     assert main(["--from", "2017-11-24", "--to", "2017-11-25"]) == 0
 
 
@@ -2399,6 +2440,16 @@ def test_missing_gold_rows_are_reported(bronze_loaded):
     bronze_loaded.command("alter table gold.fact_order_items drop partition tuple(toDate('2017-11-25'))")
     assert not reconcile(D, D2).matches
     assert main(["--from", "2017-11-24", "--to", "2017-11-25"]) == 1
+
+
+def test_unavailable_orders_are_not_revenue(bronze_loaded):
+    # o5 is unavailable; give it an Order Item so the exclusion is exercised on both sides.
+    with psycopg.connect(config.shop_db().conninfo()) as shop:
+        shop.execute(
+            "insert into shop.order_items values ('o5', 1, 'p1', 's1', '2017-11-30 12:00:00', 40.00, 4.00)"
+        )
+    _run(D, D2)
+    assert reconcile(D, D2) == Reconciliation(Decimal("240.00"), Decimal("240.00"))
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -2423,6 +2474,7 @@ import psycopg
 from pipeline import config
 from pipeline.warehouse import connect
 
+# The Revenue rule is written out again here on purpose: the check must not reuse the code it checks.
 SOURCE_REVENUE = """
     select coalesce(sum(i.price), 0)
     from shop.order_items i
@@ -2435,18 +2487,12 @@ GOLD_REVENUE = """
     from gold.daily_revenue_by_category
     where business_date between {start:Date} and {end:Date}
 """
-QUARANTINED_ROWS = """
-    select count()
-    from silver.quarantine
-    where business_date between {start:Date} and {end:Date}
-"""
 
 
 @dataclass(frozen=True)
 class Reconciliation:
     source_revenue: Decimal
     gold_revenue: Decimal
-    quarantined_rows: int
 
     @property
     def matches(self) -> bool:
@@ -2458,12 +2504,10 @@ def reconcile(start: date, end: date) -> Reconciliation:
         source = shop.execute(SOURCE_REVENUE, (start, end)).fetchone()[0]
     client = connect()
     try:
-        params = {"start": start, "end": end}
-        gold = client.query(GOLD_REVENUE, parameters=params).result_rows[0][0]
-        quarantined = client.query(QUARANTINED_ROWS, parameters=params).result_rows[0][0]
+        gold = client.query(GOLD_REVENUE, parameters={"start": start, "end": end}).result_rows[0][0]
     finally:
         client.close()
-    return Reconciliation(Decimal(source), Decimal(gold), quarantined)
+    return Reconciliation(Decimal(source), Decimal(gold))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -2474,7 +2518,6 @@ def main(argv: list[str] | None = None) -> int:
     result = reconcile(args.start, args.end)
     print(f"Shop Database Revenue: {result.source_revenue}")
     print(f"Gold Revenue:          {result.gold_revenue}")
-    print(f"Quarantined rows:      {result.quarantined_rows}")
     print("MATCH" if result.matches else "MISMATCH")
     return 0 if result.matches else 1
 

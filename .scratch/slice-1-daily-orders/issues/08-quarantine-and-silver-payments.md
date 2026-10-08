@@ -12,6 +12,7 @@
 - [ ] `silver.payments` holds the date's valid Payments with proper types
 - [ ] After a fixed source is reloaded and Silver rerun, that date has no Quarantine rows
 - [ ] Gold Revenue for the date is the same as before this ticket
+- [ ] The reconcile command also reports the number of Quarantine rows in the date range (plan Task 7 Step 5b)
 
 **How to check it yourself:**
 - Tests: `.venv/Scripts/python -m pytest -v` all pass
