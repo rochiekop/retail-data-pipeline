@@ -47,6 +47,7 @@ def test_changed_columns_fail_the_seed(tmp_path):
     source = tmp_path / "olist"
     shutil.copytree(FIXTURES, source)
     orders = source / "olist_orders_dataset.csv"
-    orders.write_text(orders.read_text().replace('"order_status"', '"status"', 1))
+    header_renamed = orders.read_text(encoding="utf-8").replace('"order_status"', '"status"', 1)
+    orders.write_text(header_renamed, encoding="utf-8")
     with pytest.raises(SourceSchemaError, match="olist_orders_dataset.csv"):
         seed_shop_db(source)
