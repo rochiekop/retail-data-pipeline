@@ -1,13 +1,15 @@
 """Build the simulated sources from the Olist CSVs: the Shop Database and the Merchandising Catalog."""
 
 import argparse
+import csv
 import sys
 from pathlib import Path
 
 import psycopg
+from openpyxl import Workbook
 
 from pipeline import config
-from pipeline.olist import SHOP_TABLES, check_header
+from pipeline.olist import CATALOG_SHEETS, SHOP_TABLES, check_header
 
 SHOP_DDL = """
 create schema if not exists shop;
@@ -88,11 +90,30 @@ def seed_shop_db(olist_dir: Path) -> dict[str, int]:
     return counts
 
 
+def build_catalog(olist_dir: Path, out_path: Path) -> None:
+    for file_name, columns in CATALOG_SHEETS.values():
+        check_header(olist_dir / file_name, columns)
+
+    workbook = Workbook(write_only=True)
+    for sheet, (file_name, _) in CATALOG_SHEETS.items():
+        worksheet = workbook.create_sheet(sheet)
+        with (olist_dir / file_name).open(encoding="utf-8-sig", newline="") as f:
+            for row in csv.reader(f):
+                worksheet.append([value if value != "" else None for value in row])
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    workbook.save(out_path)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m pipeline.seed")
-    parser.add_argument("target", choices=["shop-db"])
-    parser.parse_args(argv)
-    print(seed_shop_db(config.olist_dir()))
+    parser.add_argument("target", choices=["shop-db", "catalog"])
+    args = parser.parse_args(argv)
+    if args.target == "shop-db":
+        print(seed_shop_db(config.olist_dir()))
+    else:
+        out_path = config.catalog_path()
+        build_catalog(config.olist_dir(), out_path)
+        print(f"wrote {out_path}")
     return 0
 
 

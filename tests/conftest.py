@@ -44,3 +44,12 @@ def seeded_shop():
     from pipeline.seed import seed_shop_db
 
     seed_shop_db(FIXTURES)
+
+
+@pytest.fixture
+def catalog_file(tmp_path) -> Path:
+    from pipeline.seed import build_catalog
+
+    path = tmp_path / "merchandising_catalog.xlsx"
+    build_catalog(FIXTURES, path)
+    return path
