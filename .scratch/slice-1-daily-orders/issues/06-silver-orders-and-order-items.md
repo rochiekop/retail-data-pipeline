@@ -13,6 +13,7 @@
 - [ ] Invalid rows (each check above) don't reach Silver
 - [ ] Running the silver step twice for the same date leaves the same rows
 - [ ] A malformed date on the command line is rejected, and dbt without a Business Date fails with a message naming `business_date`
+- [ ] A dbt step for a date with no Bronze load fails and says to run the bronze step first, instead of building an empty date
 
 **How to check it yourself:**
 - Tests: `.venv/Scripts/python -m pytest -v` all pass

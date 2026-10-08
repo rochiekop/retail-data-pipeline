@@ -919,17 +919,20 @@ def test_day_without_orders_loads_nothing(seeded_shop, warehouse_client):
 
 
 def test_rerun_that_finds_nothing_becomes_the_latest_load(seeded_shop, warehouse_client):
+    def orders_in_latest_load():
+        return _rows(
+            warehouse_client,
+            "select count() from bronze.orders where _business_date = {d:Date} and _loaded_at = "
+            "(select max(_loaded_at) from bronze.shop_loads where _business_date = {d:Date})",
+            d=D,
+        )
+
     extract_shop(D)
+    assert orders_in_latest_load() == [(4,)]
     with psycopg.connect(config.shop_db().conninfo()) as shop:
         shop.execute("delete from shop.orders where order_purchase_timestamp::date = %s", (D,))
     extract_shop(D)
-    latest = _rows(
-        warehouse_client,
-        "select count() from bronze.orders where _business_date = {d:Date} and _loaded_at = "
-        "(select max(_loaded_at) from bronze.shop_loads where _business_date = {d:Date})",
-        d=D,
-    )
-    assert latest == [(0,)]
+    assert orders_in_latest_load() == [(0,)]
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -1116,11 +1119,12 @@ def test_emptied_sheet_replaces_the_older_load(catalog_file, warehouse_client):
     workbook["category_translation"].delete_rows(2, 2)  # every translation removed
     workbook.save(catalog_file)
     assert extract_catalog(catalog_file) == 3
+    latest_load = "(select max(_loaded_at) from bronze.catalog_loads)"
     assert _rows(
         warehouse_client,
-        "select count() from bronze.category_translation "
-        "where _loaded_at = (select max(_loaded_at) from bronze.catalog_loads)",
-    ) == [(0,)]
+        f"select (select count() from bronze.products where _loaded_at = {latest_load}), "
+        f"(select count() from bronze.category_translation where _loaded_at = {latest_load})",
+    ) == [(3, 0)]
 
 
 def test_blank_rows_are_ignored(catalog_file, warehouse_client):
@@ -1160,6 +1164,15 @@ def test_missing_catalog_fails_the_run(tmp_path, warehouse_client):
         extract_catalog(tmp_path / "missing.xlsx")
 
 
+def test_changed_columns_fail_the_run(catalog_file, warehouse_client):
+    workbook = load_workbook(catalog_file)
+    workbook["products"]["B1"] = "category"
+    workbook.save(catalog_file)
+    with pytest.raises(SourceSchemaError, match=r"merchandising_catalog.xlsx\[products\]"):
+        extract_catalog(catalog_file)
+    catalog_file.unlink()  # the workbook must be closed after a failed check
+
+
 def test_missing_sheet_fails_the_run(tmp_path, warehouse_client):
     path = tmp_path / "catalog.xlsx"
     workbook = Workbook()
@@ -1176,7 +1189,7 @@ Expected: ERROR, `ImportError: cannot import name 'extract_catalog'`
 
 - [ ] **Step 3: Implement catalog extraction**
 
-In `src/pipeline/bronze.py`, add `import hashlib`, `from pathlib import Path` and `from openpyxl import load_workbook` to the imports, change the olist import to `from pipeline.olist import CATALOG_SHEETS, SHOP_TABLES, SourceSchemaError`, add `client.command(_CATALOG_LOADS_DDL)` as the last line of `ensure_bronze_tables`, and append:
+In `src/pipeline/bronze.py`, add `import hashlib`, `from io import BytesIO`, `from pathlib import Path` and `from openpyxl import load_workbook` to the imports, change the olist import to `from pipeline.olist import CATALOG_SHEETS, SHOP_TABLES, SourceSchemaError`, add `client.command(_CATALOG_LOADS_DDL)` as the last line of `ensure_bronze_tables`, and append:
 ```python
 # One row per loaded catalog file, written after both sheets, even when a sheet is empty. It is what
 # "already loaded" checks, and Silver reads both sheets at the latest of these.
@@ -1191,32 +1204,36 @@ order by _loaded_at
 """
 
 
-def _read_catalog(path: Path) -> dict[str, list[tuple]]:
-    workbook = load_workbook(path, read_only=True)
-    missing = [sheet for sheet in CATALOG_SHEETS if sheet not in workbook.sheetnames]
-    if missing:
-        raise SourceSchemaError(f"{path.name}: missing sheets {missing}")
-    sheets = {}
-    for sheet, (_, columns) in CATALOG_SHEETS.items():
-        rows = workbook[sheet].iter_rows(values_only=True)
-        header = list(next(rows, ()))
-        if header != columns:
-            raise SourceSchemaError(f"{path.name}[{sheet}]: expected columns {columns}, got {header}")
-        # A workbook can store no cells after a row's last value (build_catalog's do), so pad to the header width.
-        sheets[sheet] = [
-            tuple(None if v is None else str(v) for v in (row + (None,) * len(columns))[: len(columns)])
-            for row in rows
-            if any(v is not None for v in row)
-        ]
-    workbook.close()
-    return sheets
+def _read_catalog(name: str, content: bytes) -> dict[str, list[tuple]]:
+    workbook = load_workbook(BytesIO(content), read_only=True)
+    try:
+        missing = [sheet for sheet in CATALOG_SHEETS if sheet not in workbook.sheetnames]
+        if missing:
+            raise SourceSchemaError(f"{name}: missing sheets {missing}")
+        sheets = {}
+        for sheet, (_, columns) in CATALOG_SHEETS.items():
+            rows = workbook[sheet].iter_rows(values_only=True)
+            header = list(next(rows, ()))
+            if header != columns:
+                raise SourceSchemaError(f"{name}[{sheet}]: expected columns {columns}, got {header}")
+            # A workbook can store no cells after a row's last value (build_catalog's do), so pad to the header width.
+            sheets[sheet] = [
+                tuple(None if v is None else str(v) for v in (row + (None,) * len(columns))[: len(columns)])
+                for row in rows
+                if any(v is not None for v in row)
+            ]
+        return sheets
+    finally:
+        workbook.close()
 
 
 def extract_catalog(path: Path) -> int | None:
     if not path.exists():
         raise FileNotFoundError(f"Merchandising Catalog not found: {path}")
-    checksum = hashlib.sha256(path.read_bytes()).hexdigest()
-    sheets = _read_catalog(path)
+    # Read the file once, so the checksum always describes the rows that are loaded.
+    content = path.read_bytes()
+    checksum = hashlib.sha256(content).hexdigest()
+    sheets = _read_catalog(path.name, content)
 
     loaded_at = datetime.now(timezone.utc)
     client = connect()
@@ -1312,6 +1329,7 @@ def add_bronze_rows(warehouse_client):
             "select max(_loaded_at) from bronze.shop_loads where _business_date = {d:Date}",
             parameters={"d": business_date},
         ).result_rows[0][0]
+        assert loaded_at.year > 1970, f"no Bronze load for {business_date}"  # max() of no rows is 1970
         for row in rows:
             warehouse_client.insert(
                 table,
@@ -1401,6 +1419,11 @@ def test_cli_rejects_a_malformed_business_date():
         main(["--business-date", "2017-13-40", "--step", "silver"])
 
 
+def test_silver_without_a_bronze_load_fails(warehouse_client):
+    with pytest.raises(RuntimeError, match="run the bronze step first"):
+        run_step("silver", D)
+
+
 def test_dbt_refuses_to_run_without_a_business_date(bronze_loaded):
     result = subprocess.run(
         [str(dbt_executable()), "build", "--select", "path:models/silver",
@@ -1433,7 +1456,8 @@ from datetime import date
 from pathlib import Path
 
 from pipeline import config
-from pipeline.bronze import extract_catalog, extract_shop
+from pipeline.bronze import ensure_bronze_tables, extract_catalog, extract_shop
+from pipeline.warehouse import connect
 
 STEPS = ("bronze", "silver", "facts", "dimensions")
 DBT_SELECTORS = {
@@ -1467,11 +1491,29 @@ def _dbt_build(selector: str, business_date: date) -> None:
         )
 
 
+def _require_bronze_load(business_date: date) -> None:
+    # ClickHouse's max() over no rows is 1970, not NULL, so without this check a dbt step would
+    # quietly build an empty Business Date when the bronze step never ran for it.
+    client = connect()
+    try:
+        ensure_bronze_tables(client)
+        shop_loads = client.query(
+            "select count() from bronze.shop_loads where _business_date = {d:Date}",
+            parameters={"d": business_date},
+        ).result_rows[0][0]
+        catalog_loads = client.query("select count() from bronze.catalog_loads").result_rows[0][0]
+    finally:
+        client.close()
+    if not shop_loads or not catalog_loads:
+        raise RuntimeError(f"No Bronze load for {business_date}: run the bronze step first")
+
+
 def run_step(step: str, business_date: date) -> None:
     if step == "bronze":
         extract_catalog(config.catalog_path())
         extract_shop(business_date)
     elif step in DBT_SELECTORS:
+        _require_bronze_load(business_date)
         _dbt_build(DBT_SELECTORS[step], business_date)
     else:
         raise ValueError(f"unknown step {step!r}")
@@ -1693,7 +1735,7 @@ models:
 - [ ] **Step 6: Run the tests to verify they pass**
 
 Run: `.venv/Scripts/python -m pytest tests/test_silver_orders.py -v`
-Expected: 6 passed. In `test_bad_orders_go_to_quarantine` the duplicate `o1` rows differ only in optional columns. Which one is kept doesn't matter: the test only checks that exactly one `o1` reaches Silver and one is quarantined.
+Expected: 7 passed. In `test_bad_orders_go_to_quarantine` the duplicate `o1` rows differ only in optional columns. Which one is kept doesn't matter: the test only checks that exactly one `o1` reaches Silver and one is quarantined.
 
 If dbt reports a cyclic alias or an "ambiguous column" error, look for an expression aliased to a name that already exists in its input (see Global Constraints) and rename it.
 

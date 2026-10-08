@@ -17,5 +17,5 @@
 - [ ] Every load is recorded in `bronze.catalog_loads`, so a new version with an emptied sheet replaces the older sheet
 
 **How to check it yourself:**
-- Tests: `.venv/Scripts/python -m pytest tests/test_bronze_catalog.py -v` shows 9 passed
+- Tests: `.venv/Scripts/python -m pytest tests/test_bronze_catalog.py -v` shows 10 passed
 - Every earlier test still passes: `.venv/Scripts/python -m pytest -v`
