@@ -492,7 +492,8 @@ def test_changed_columns_fail_the_seed(tmp_path):
     source = tmp_path / "olist"
     shutil.copytree(FIXTURES, source)
     orders = source / "olist_orders_dataset.csv"
-    orders.write_text(orders.read_text().replace('"order_status"', '"status"', 1))
+    header_renamed = orders.read_text(encoding="utf-8").replace('"order_status"', '"status"', 1)
+    orders.write_text(header_renamed, encoding="utf-8")
     with pytest.raises(SourceSchemaError, match="olist_orders_dataset.csv"):
         seed_shop_db(source)
 ```
@@ -780,7 +781,8 @@ def test_changed_columns_fail_the_build(tmp_path):
     source = tmp_path / "olist"
     shutil.copytree(FIXTURES, source)
     products = source / "olist_products_dataset.csv"
-    products.write_text(products.read_text().replace("product_category_name", "category", 1))
+    header_renamed = products.read_text(encoding="utf-8").replace("product_category_name", "category", 1)
+    products.write_text(header_renamed, encoding="utf-8")
     with pytest.raises(SourceSchemaError, match="olist_products_dataset.csv"):
         build_catalog(source, tmp_path / "catalog.xlsx")
 ```
@@ -817,8 +819,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.target == "shop-db":
         print(seed_shop_db(config.olist_dir()))
     else:
-        build_catalog(config.olist_dir(), config.catalog_path())
-        print(f"wrote {config.catalog_path()}")
+        out_path = config.catalog_path()
+        build_catalog(config.olist_dir(), out_path)
+        print(f"wrote {out_path}")
     return 0
 ```
 
@@ -1030,7 +1033,7 @@ import pytest
 from openpyxl import Workbook, load_workbook
 
 from pipeline.bronze import extract_catalog
-from pipeline.olist import SourceSchemaError
+from pipeline.olist import CATALOG_SHEETS, SourceSchemaError
 
 
 def _rows(client, query):
@@ -1065,6 +1068,21 @@ def test_blank_rows_are_ignored(catalog_file, warehouse_client):
     workbook["products"].append([None] * 9)
     workbook.save(catalog_file)
     assert extract_catalog(catalog_file) == 5
+
+
+def test_trailing_blank_cells_load_as_null(tmp_path, warehouse_client):
+    # A write-only workbook (as build_catalog makes) stores no cells after a row's last value,
+    # so this row reads back as ("p9",). Olist has two products like it.
+    path = tmp_path / "catalog.xlsx"
+    workbook = Workbook(write_only=True)
+    for sheet, (_, columns) in CATALOG_SHEETS.items():
+        workbook.create_sheet(sheet).append(columns)
+    workbook.worksheets[0].append(["p9"])
+    workbook.save(path)
+    assert extract_catalog(path) == 1
+    assert _rows(
+        warehouse_client, "select product_category_name, product_width_cm from bronze.products where product_id = 'p9'"
+    ) == [(None, None)]
 
 
 def test_numbers_typed_into_excel_are_stored_as_text(catalog_file, warehouse_client):
@@ -1111,8 +1129,9 @@ def _read_catalog(path: Path) -> dict[str, list[tuple]]:
         header = list(next(rows, ()))
         if header != columns:
             raise SourceSchemaError(f"{path.name}[{sheet}]: expected columns {columns}, got {header}")
+        # A workbook can store no cells after a row's last value (build_catalog's do), so pad to the header width.
         sheets[sheet] = [
-            tuple(None if v is None else str(v) for v in row[: len(columns)])
+            tuple(None if v is None else str(v) for v in (row + (None,) * len(columns))[: len(columns)])
             for row in rows
             if any(v is not None for v in row)
         ]

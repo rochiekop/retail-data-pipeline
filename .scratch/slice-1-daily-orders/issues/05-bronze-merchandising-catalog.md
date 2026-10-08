@@ -13,7 +13,8 @@
 - [ ] An edited file loads as a new version
 - [ ] A missing file, missing sheet or changed columns fail with a clear error
 - [ ] Blank rows are skipped, and numeric cells are stored as text
+- [ ] A row whose trailing cells are blank (Excel stores fewer cells) loads with those columns as NULL
 
 **How to check it yourself:**
-- Tests: `.venv/Scripts/python -m pytest tests/test_bronze_catalog.py -v` shows 7 passed
+- Tests: `.venv/Scripts/python -m pytest tests/test_bronze_catalog.py -v` shows 8 passed
 - Every earlier test still passes: `.venv/Scripts/python -m pytest -v`
