@@ -1306,7 +1306,7 @@ git commit -m "feat: load the Merchandising Catalog into Bronze, skipping unchan
 
 Append to `tests/conftest.py`:
 ```python
-from datetime import date  # noqa: E402
+from datetime import date, timezone  # noqa: E402
 
 BUSINESS_DATE = date(2017, 11, 24)
 
@@ -1330,6 +1330,9 @@ def add_bronze_rows(warehouse_client):
             parameters={"d": business_date},
         ).result_rows[0][0]
         assert loaded_at.year > 1970, f"no Bronze load for {business_date}"  # max() of no rows is 1970
+        # clickhouse-connect returns a naive datetime holding UTC; inserted back naive, it would be read
+        # as local time and land in a load nobody reads, so every bad-row test would pass vacuously.
+        loaded_at = loaded_at.replace(tzinfo=timezone.utc)
         for row in rows:
             warehouse_client.insert(
                 table,
@@ -1851,6 +1854,22 @@ def test_bad_payments_go_to_quarantine(bronze_loaded, add_bronze_rows):
         bronze_loaded,
         "select record_key, failure_reason from silver.quarantine where entity = 'payment' order by record_key",
     ) == [("o3/2", "negative payment_value"), ("o3/x", "invalid payment_sequential")]
+
+
+def test_numbers_written_differently_are_still_duplicates(bronze_loaded, add_bronze_rows):
+    # "01" and "1" are the same key; letting both through would fail the uniqueness test and the run.
+    # The extra rows sort after the originals ("99.00" > "100.00", "16.00" > "15.00" as text), so they are the ones dropped.
+    add_bronze_rows("order_items", [_item("o1", "01", "p1", "99.00")])
+    add_bronze_rows("order_payments", [
+        {"order_id": "o1", "payment_sequential": "01", "payment_type": "voucher", "payment_installments": "1", "payment_value": "16.00"},
+    ])
+    run_step("silver", D)
+    assert _rows(bronze_loaded, "select count() from silver.order_items where order_id = 'o1'") == [(2,)]
+    assert _rows(bronze_loaded, "select count() from silver.payments where order_id = 'o1'") == [(2,)]
+    assert _rows(
+        bronze_loaded,
+        "select entity, record_key, failure_reason from silver.quarantine where record_key like 'o1/%' order by entity",
+    ) == [("order_item", "o1/01", "duplicate order item"), ("payment", "o1/01", "duplicate payment")]
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -1928,7 +1947,8 @@ items_typed as (
         toDecimal64OrNull(price, 2) as price_amount,
         toDecimal64OrNull(freight_value, 2) as freight_amount,
         _loaded_at as loaded_at,
-        row_number() over (partition by order_id, order_item_id order by product_id, price) as occurrence
+        -- Duplicates are judged on the parsed number, so "01" and "1" are the same Order Item.
+        row_number() over (partition by order_id, toInt32OrNull(order_item_id) order by product_id, price) as occurrence
     from items_src
 ),
 
@@ -1975,7 +1995,10 @@ payments_typed as (
         toInt32OrNull(payment_installments) as installments,
         toDecimal64OrNull(payment_value, 2) as amount,
         _loaded_at as loaded_at,
-        row_number() over (partition by order_id, payment_sequential order by payment_type, payment_value) as occurrence
+        -- Duplicates are judged on the parsed number, so "01" and "1" are the same Payment.
+        row_number() over (
+            partition by order_id, toInt32OrNull(payment_sequential) order by payment_type, payment_value
+        ) as occurrence
     from payments_src
 ),
 
