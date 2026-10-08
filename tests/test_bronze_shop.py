@@ -59,14 +59,17 @@ def test_day_without_orders_loads_nothing(seeded_shop, warehouse_client):
 
 
 def test_rerun_that_finds_nothing_becomes_the_latest_load(seeded_shop, warehouse_client):
+    def orders_in_latest_load():
+        return _rows(
+            warehouse_client,
+            "select count() from bronze.orders where _business_date = {d:Date} and _loaded_at = "
+            "(select max(_loaded_at) from bronze.shop_loads where _business_date = {d:Date})",
+            d=D,
+        )
+
     extract_shop(D)
+    assert orders_in_latest_load() == [(4,)]
     with psycopg.connect(config.shop_db().conninfo()) as shop:
         shop.execute("delete from shop.orders where order_purchase_timestamp::date = %s", (D,))
     extract_shop(D)
-    latest = _rows(
-        warehouse_client,
-        "select count() from bronze.orders where _business_date = {d:Date} and _loaded_at = "
-        "(select max(_loaded_at) from bronze.shop_loads where _business_date = {d:Date})",
-        d=D,
-    )
-    assert latest == [(0,)]
+    assert orders_in_latest_load() == [(0,)]
