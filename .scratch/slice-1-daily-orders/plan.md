@@ -2670,7 +2670,7 @@ git commit -m "feat: reconcile Gold Revenue against the Shop Database"
 This task's deliverable is checked by running the real system, which covers done criteria 1–5 in the spec.
 
 **Files:**
-- Create: `airflow/Dockerfile`, `airflow/dags/daily_orders.py`, `README.md`
+- Create: `airflow/Dockerfile`, `airflow/dags/daily_orders.py`, `README.md`, `.dockerignore` (keeps `.venv`, `data` and `.git` out of the build context)
 - Modify: `docker-compose.yml`
 
 **Interfaces:**
@@ -2702,13 +2702,21 @@ Append to `services:` in `docker-compose.yml`:
       POSTGRES_PASSWORD: airflow
       POSTGRES_DB: airflow
     volumes: [airflow-data:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 5s
+      retries: 12
 
   airflow:
     build:
       context: .
       dockerfile: airflow/Dockerfile
     command: standalone
-    depends_on: [airflow-db, shop-db, warehouse]
+    restart: unless-stopped
+    depends_on:
+      airflow-db: {condition: service_healthy}
+      shop-db: {condition: service_started}
+      warehouse: {condition: service_started}
     ports: ["8080:8080"]
     environment:
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-db/airflow
@@ -2734,12 +2742,14 @@ Add `airflow-data:` under `volumes:`.
 
 `airflow/dags/daily_orders.py`:
 ```python
-"""Daily Orders: Bronze -> Silver -> Gold facts -> Gold dimensions for one Business Date ({{ ds }})."""
+"""Daily Orders: Bronze -> Silver -> Gold facts -> Gold dimensions for one Business Date."""
 
 import pendulum
 from airflow.providers.standard.operators.bash import BashOperator
 from airflow.sdk import dag
 
+# {{ ds }} is the logical date's UTC calendar day. Scheduled runs fall at Sao Paulo midnight (02:00 or 03:00
+# UTC, the same day), so it is the Business Date; it also lets `airflow dags test daily_orders 2017-11-24` mean that day.
 RUN_STEP = "/home/airflow/pipeline-venv/bin/python -m pipeline.run --business-date {{ ds }} --step "
 
 
@@ -2769,6 +2779,7 @@ daily_orders()
 ```bash
 docker compose up -d --build
 docker compose exec airflow airflow pools set dimensions 1 "Rebuild Gold dimensions one run at a time"
+docker compose exec airflow airflow dags unpause daily_orders   # backfill runs stay queued while the DAG is paused
 docker compose exec airflow airflow dags list-import-errors
 docker compose exec airflow airflow dags list | grep daily_orders
 ```
@@ -2794,14 +2805,14 @@ docker compose exec airflow airflow dags test daily_orders 2017-11-24
 docker compose exec warehouse clickhouse-client --user warehouse --password warehouse \
   -q "select * from gold.daily_revenue_by_category where business_date = '2017-11-24' order by revenue desc limit 5"
 ```
-Expected: all four tasks succeed, with about 70 category rows for Black Friday 2017. This first single run also creates every Silver and Gold table, so the parallel backfill below never races to create them.
+Expected: all four tasks succeed, with 48 category rows for Black Friday 2017. This first single run also creates every Silver and Gold table, so the parallel backfill below never races to create them.
 
 - [ ] **Step 7: Backfill every Olist date (done criterion 4)**
 
 ```bash
-docker compose exec airflow airflow backfill create --dag-id daily_orders --from-date 2016-09-04 --to-date 2018-10-17 --max-active-runs 4
+docker compose exec airflow airflow backfill create --dag-id daily_orders --from-date 2016-09-04 --to-date 2018-10-18 --max-active-runs 4
 ```
-If the flags differ in this Airflow version, check `airflow backfill create --help`. Track progress in the UI. Expect a few hours, mostly dbt start-up time per run.
+If the flags differ in this Airflow version, check `airflow backfill create --help`. `--to-date` is 2018-10-18 on purpose: runs fall at São Paulo midnight (02:00 or 03:00 UTC), so a 2018-10-17 bound (00:00 UTC) would drop the last day; the DAG's `end_date` stops it at 2018-10-17. Check with `--dry-run` first: 774 runs. Track progress in the UI. Expect a few hours, mostly dbt start-up time per run.
 
 Then reconcile from the host:
 ```bash
@@ -2832,16 +2843,14 @@ Shop Database (Postgres) + Merchandising Catalog (Excel) → **Bronze** → **Si
 
 ## Setup
 
+Download https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce into `data/olist/raw/` first (on Linux, `docker compose up` would otherwise create `data/` owned by root). Then:
+
 ```bash
 python -m venv .venv
 .venv/Scripts/python -m pip install -e ".[dev]"     # .venv/bin/... on macOS/Linux
 docker compose up -d --build
+# Wait until http://localhost:8080 responds (Airflow migrates its database on first start), then:
 docker compose exec airflow airflow pools set dimensions 1 "Rebuild Gold dimensions one run at a time"
-```
-
-Download https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce into `data/olist/raw/`, then:
-
-```bash
 .venv/Scripts/python -m pipeline.seed shop-db
 .venv/Scripts/python -m pipeline.seed catalog
 ```
@@ -2850,9 +2859,18 @@ Download https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce into `data/
 
 - One Business Date: `docker compose exec airflow airflow dags test daily_orders 2017-11-24`
 - Without Airflow: `.venv/Scripts/python -m pipeline.run --business-date 2017-11-24 --step all`
-- Backfill (run one date first so the tables exist):
-  `docker compose exec airflow airflow backfill create --dag-id daily_orders --from-date 2016-09-04 --to-date 2018-10-17 --max-active-runs 4`
+- Backfill (run one date first so the tables exist, and unpause the DAG: backfill runs stay queued while it is paused):
+  `docker compose exec airflow airflow dags unpause daily_orders`, then
+  `docker compose exec airflow airflow backfill create --dag-id daily_orders --from-date 2016-09-04 --to-date 2018-10-18 --max-active-runs 4`
+- Watch runs in the Airflow UI: http://localhost:8080
 - Check Gold against the source: `.venv/Scripts/python -m pipeline.reconcile --from 2016-09-04 --to 2018-10-17`
+- Prove a rerun changes nothing (run it after any backfill finishes; `dags test` ignores the `dimensions` pool):
+  ```bash
+  HASH="select cityHash64(groupArray(tuple(*))) from (select * from gold.daily_revenue_by_category where business_date = '2017-11-24' order by product_category)"
+  docker compose exec warehouse clickhouse-client --user warehouse --password warehouse -q "$HASH"
+  docker compose exec airflow airflow dags test daily_orders 2017-11-24
+  docker compose exec warehouse clickhouse-client --user warehouse --password warehouse -q "$HASH"   # same value
+  ```
 - Query the warehouse: `docker compose exec warehouse clickhouse-client --user warehouse --password warehouse`
 
 ## Gold star schema
@@ -2875,6 +2893,6 @@ Tests use the `shop_test` Postgres database and the `warehouse-test` ClickHouse 
 - [ ] **Step 10: Commit**
 
 ```bash
-git add airflow docker-compose.yml README.md
+git add airflow docker-compose.yml README.md .dockerignore
 git commit -m "feat: orchestrate Daily Orders with Airflow and document the runbook"
 ```
