@@ -1,0 +1,4 @@
+product_id,product_category_name,product_name_lenght,product_description_lenght,product_photos_qty,product_weight_g,product_length_cm,product_height_cm,product_width_cm
+p1,brinquedos,40,287,1,225,16,10,14
+p2,,,,,700,30,20,20
+p3,pc_gamer,55,600,2,1500,40,10,30

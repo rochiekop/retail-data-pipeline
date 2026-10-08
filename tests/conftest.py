@@ -37,3 +37,10 @@ def warehouse_client():
         client.command(f"drop database if exists {database} sync")
     yield client
     client.close()
+
+
+@pytest.fixture
+def seeded_shop():
+    from pipeline.seed import seed_shop_db
+
+    seed_shop_db(FIXTURES)
