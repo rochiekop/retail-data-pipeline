@@ -2748,16 +2748,20 @@ import pendulum
 from airflow.providers.standard.operators.bash import BashOperator
 from airflow.sdk import dag
 
-# {{ ds }} is the logical date's UTC calendar day. Scheduled runs fall at Sao Paulo midnight (02:00 or 03:00
-# UTC, the same day), so it is the Business Date; it also lets `airflow dags test daily_orders 2017-11-24` mean that day.
-RUN_STEP = "/home/airflow/pipeline-venv/bin/python -m pipeline.run --business-date {{ ds }} --step "
+# Runs fire at midnight Indonesia Western Time (WIB, Asia/Jakarta). The Business Date is the logical date's
+# calendar day in that zone: plain {{ ds }} is the UTC day, which is the day before (00:00 WIB = 17:00 UTC).
+# A UTC-midnight logical date such as `airflow dags test daily_orders 2017-11-24` is 07:00 WIB, the same day.
+# The Business Date still selects Orders by their purchase timestamp as stored (Sao Paulo local time, CONTEXT.md).
+TIMEZONE = "Asia/Jakarta"
+BUSINESS_DATE = "{{ logical_date.in_timezone('" + TIMEZONE + "').strftime('%Y-%m-%d') }}"
+RUN_STEP = "/home/airflow/pipeline-venv/bin/python -m pipeline.run --business-date " + BUSINESS_DATE + " --step "
 
 
 @dag(
     dag_id="daily_orders",
     schedule="@daily",
-    start_date=pendulum.datetime(2016, 9, 4, tz="America/Sao_Paulo"),
-    end_date=pendulum.datetime(2018, 10, 17, tz="America/Sao_Paulo"),
+    start_date=pendulum.datetime(2016, 9, 4, tz=TIMEZONE),
+    end_date=pendulum.datetime(2018, 10, 17, tz=TIMEZONE),
     catchup=False,
     max_active_runs=4,
     default_args={"retries": 1, "retry_delay": pendulum.duration(minutes=2)},
@@ -2810,9 +2814,9 @@ Expected: all four tasks succeed, with 48 category rows for Black Friday 2017. T
 - [ ] **Step 7: Backfill every Olist date (done criterion 4)**
 
 ```bash
-docker compose exec airflow airflow backfill create --dag-id daily_orders --from-date 2016-09-04 --to-date 2018-10-18 --max-active-runs 4
+docker compose exec airflow airflow backfill create --dag-id daily_orders --from-date 2016-09-03 --to-date 2018-10-17 --max-active-runs 4
 ```
-If the flags differ in this Airflow version, check `airflow backfill create --help`. `--to-date` is 2018-10-18 on purpose: runs fall at São Paulo midnight (02:00 or 03:00 UTC), so a 2018-10-17 bound (00:00 UTC) would drop the last day; the DAG's `end_date` stops it at 2018-10-17. Check with `--dry-run` first: 774 runs. Track progress in the UI. Expect a few hours, mostly dbt start-up time per run.
+If the flags differ in this Airflow version, check `airflow backfill create --help`. The dates are in UTC and runs fall at 00:00 WIB (Asia/Jakarta) = 17:00 UTC the day before, so the range is `--from-date 2016-09-03 --to-date 2018-10-17`; the DAG's `start_date` and `end_date` keep it to 2016-09-04 to 2018-10-17 WIB. Check with `--dry-run` first: 774 runs, all at 17:00 UTC. Track progress in the UI. Expect a few hours, mostly dbt start-up time per run.
 
 Then reconcile from the host:
 ```bash
@@ -2841,6 +2845,10 @@ An end-to-end ELT learning pipeline for an e-commerce business (Olist). The voca
 
 Shop Database (Postgres) + Merchandising Catalog (Excel) → **Bronze** → **Silver** (+ Quarantine) → **Gold** star schema, all in ClickHouse, one Business Date per run, orchestrated by Airflow.
 
+![Daily Orders pipeline: seven numbered steps with the tools each uses](docs/pipeline-flow.svg)
+
+Airflow runs the daily steps at 00:00 WIB (Asia/Jakarta). The Business Date is still the calendar day of each Order's purchase timestamp as stored (São Paulo time); the schedule's timezone only decides when runs fire. A walkthrough of one Business Date through every layer is in [docs/pipeline-flow.html](docs/pipeline-flow.html).
+
 ## Setup
 
 Download https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce into `data/olist/raw/` first (on Linux, `docker compose up` would otherwise create `data/` owned by root). Then:
@@ -2861,7 +2869,7 @@ docker compose exec airflow airflow pools set dimensions 1 "Rebuild Gold dimensi
 - Without Airflow: `.venv/Scripts/python -m pipeline.run --business-date 2017-11-24 --step all`
 - Backfill (run one date first so the tables exist, and unpause the DAG: backfill runs stay queued while it is paused):
   `docker compose exec airflow airflow dags unpause daily_orders`, then
-  `docker compose exec airflow airflow backfill create --dag-id daily_orders --from-date 2016-09-04 --to-date 2018-10-18 --max-active-runs 4`
+  `docker compose exec airflow airflow backfill create --dag-id daily_orders --from-date 2016-09-03 --to-date 2018-10-17 --max-active-runs 4`
 - Watch runs in the Airflow UI: http://localhost:8080
 - Check Gold against the source: `.venv/Scripts/python -m pipeline.reconcile --from 2016-09-04 --to 2018-10-17`
 - Prove a rerun changes nothing (run it after any backfill finishes; `dags test` ignores the `dimensions` pool):
