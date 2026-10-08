@@ -1,0 +1,15 @@
+retail:
+  target: dev
+  outputs:
+    dev:
+      type: clickhouse
+      driver: http
+      host: "{{ env_var('WAREHOUSE_HOST', 'localhost') }}"
+      port: "{{ env_var('WAREHOUSE_PORT', '8123') | int }}"
+      user: "{{ env_var('WAREHOUSE_USER', 'warehouse') }}"
+      password: "{{ env_var('WAREHOUSE_PASSWORD', 'warehouse') }}"
+      schema: default
+      threads: 4
+      custom_settings:
+        # LEFT JOIN misses must be NULL, not '' or 0, or Silver checks pass bad rows.
+        join_use_nulls: 1

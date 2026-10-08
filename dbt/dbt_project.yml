@@ -1,0 +1,26 @@
+name: retail
+version: "1.0.0"
+profile: retail
+config-version: 2
+
+model-paths: ["models"]
+macro-paths: ["macros"]
+test-paths: ["tests"]
+
+models:
+  retail:
+    silver:
+      +schema: silver
+      +materialized: incremental
+      +incremental_strategy: append
+      +engine: MergeTree()
+      +partition_by: business_date
+      +pre-hook: "{{ delete_business_date() }}"
+    gold:
+      +schema: gold
+      facts:
+        +materialized: incremental
+        +incremental_strategy: append
+        +engine: MergeTree()
+        +partition_by: business_date
+        +pre-hook: "{{ delete_business_date() }}"

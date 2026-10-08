@@ -53,3 +53,41 @@ def catalog_file(tmp_path) -> Path:
     path = tmp_path / "merchandising_catalog.xlsx"
     build_catalog(FIXTURES, path)
     return path
+
+
+from datetime import date, timezone  # noqa: E402
+
+BUSINESS_DATE = date(2017, 11, 24)
+
+
+@pytest.fixture
+def bronze_loaded(seeded_shop, catalog_file, warehouse_client, monkeypatch):
+    from pipeline.run import run_step
+
+    monkeypatch.setenv("CATALOG_PATH", str(catalog_file))
+    run_step("bronze", BUSINESS_DATE)
+    return warehouse_client
+
+
+@pytest.fixture
+def add_bronze_rows(warehouse_client):
+    """Insert extra rows into the latest Bronze load, simulating bad source data."""
+
+    def add(table: str, rows: list[dict], business_date: date = BUSINESS_DATE) -> None:
+        loaded_at = warehouse_client.query(
+            "select max(_loaded_at) from bronze.shop_loads where _business_date = {d:Date}",
+            parameters={"d": business_date},
+        ).result_rows[0][0]
+        assert loaded_at.year > 1970, f"no Bronze load for {business_date}"  # max() of no rows is 1970
+        # clickhouse-connect returns a naive datetime holding UTC; inserted back naive, it would be read
+        # as local time and land in a load nobody reads, so every bad-row test would pass vacuously.
+        loaded_at = loaded_at.replace(tzinfo=timezone.utc)
+        for row in rows:
+            warehouse_client.insert(
+                table,
+                [(*row.values(), business_date, loaded_at)],
+                column_names=[*row, "_business_date", "_loaded_at"],
+                database="bronze",
+            )
+
+    return add
