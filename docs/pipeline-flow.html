@@ -109,9 +109,9 @@ code { font-family: var(--font-mono); font-size: 0.85em; }
   </header>
 
   <section aria-labelledby="arch">
-    <h2 id="arch">Pipeline, step by step</h2>
+    <h2 id="arch">Pipeline at a glance</h2>
     <div class="diagram">
-      <img src="pipeline-flow.svg" width="1200" height="610" alt="Seven numbered steps: 1 download the Olist CSVs from Kaggle; 2 seed the Postgres Shop Database and the Excel Merchandising Catalog with Python; then, orchestrated daily by Airflow at 00:00 WIB: 3 Python loads Bronze in ClickHouse, 4 dbt builds Silver and sends bad rows to the Quarantine, 5 dbt builds the Gold fact, 6 dbt rebuilds the Gold dimensions and the daily Revenue view; 7 reconcile compares Gold Revenue with the Shop Database.">
+      <img src="pipeline-flow.svg" width="1280" height="830" alt="Daily Orders pipeline infographic: Olist CSVs from Kaggle seed a Postgres Shop Database and an Excel Merchandising Catalog; Python extracts one Business Date and loads it unchanged into ClickHouse Bronze; dbt builds Silver (typed and checked, bad rows to the Quarantine) and a Gold star schema with daily Revenue by Product Category for dashboards, ad-hoc SQL, reports and ML features. Airflow runs it daily at 00:00 WIB in Docker Compose, and pytest tests it.">
     </div>
     <div class="legend">
       <span>Steps 3 to 6 run once per Business Date. Rerunning a date drops its partitions and rebuilds them, so a rerun changes nothing.</span>

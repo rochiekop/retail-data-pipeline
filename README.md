@@ -4,7 +4,7 @@ An end-to-end ELT learning pipeline for an e-commerce business (Olist). The voca
 
 Shop Database (Postgres) + Merchandising Catalog (Excel) → **Bronze** → **Silver** (+ Quarantine) → **Gold** star schema, all in ClickHouse, one Business Date per run, orchestrated by Airflow.
 
-![Daily Orders pipeline: seven numbered steps with the tools each uses](docs/pipeline-flow.svg)
+![Daily Orders pipeline: sources, Python, the ClickHouse + dbt medallion, analytics and the tech stack](docs/pipeline-flow.svg)
 
 Airflow runs the daily steps at 00:00 WIB (Asia/Jakarta). The Business Date is still the calendar day of each Order's purchase timestamp as stored (São Paulo time); the schedule's timezone only decides when runs fire. A walkthrough of one Business Date through every layer is in [docs/pipeline-flow.html](docs/pipeline-flow.html).
 
