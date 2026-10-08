@@ -1,0 +1,3 @@
+# One business split across simulated sources
+
+All source data comes from a single public dataset (Olist Brazilian E-commerce), deliberately split across different source types: Orders, Order Items, Payments, and Customers go into a Postgres Shop Database, the product catalog and category translations go into Excel as the Merchandising Catalog, and later Orders are replayed as a real-time stream. We considered combining several public datasets (e.g. Online Retail II as the Excel source), but separate businesses share no Customers or products, so their data could never be joined. Splitting one coherent business keeps cross-source joins meaningful while still exercising database, file, and streaming ingestion.

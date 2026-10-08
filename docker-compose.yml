@@ -1,0 +1,32 @@
+x-clickhouse: &clickhouse
+  image: clickhouse/clickhouse-server:25.8
+  environment:
+    CLICKHOUSE_USER: warehouse
+    CLICKHOUSE_PASSWORD: warehouse
+    CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+  ulimits:
+    nofile: { soft: 262144, hard: 262144 }
+
+services:
+  shop-db:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: shop
+      POSTGRES_PASSWORD: shop
+      POSTGRES_DB: shop
+    ports: ["5433:5432"]
+    volumes: [shop-data:/var/lib/postgresql/data]
+
+  warehouse:
+    <<: *clickhouse
+    ports: ["8123:8123"]
+    volumes: [warehouse-data:/var/lib/clickhouse]
+
+  # Throwaway warehouse for pytest; no volume, so it starts empty every time.
+  warehouse-test:
+    <<: *clickhouse
+    ports: ["8124:8123"]
+
+volumes:
+  shop-data:
+  warehouse-data:
