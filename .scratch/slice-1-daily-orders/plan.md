@@ -2854,6 +2854,7 @@ Airflow runs the daily steps at 00:00 WIB (Asia/Jakarta). The Business Date is s
 Download https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce into `data/olist/raw/` first (on Linux, `docker compose up` would otherwise create `data/` owned by root). Then:
 
 ```bash
+cp .env.example .env                               # then set your own passwords in .env (git-ignored)
 python -m venv .venv
 .venv/Scripts/python -m pip install -e ".[dev]"     # .venv/bin/... on macOS/Linux
 docker compose up -d --build
@@ -2875,11 +2876,11 @@ docker compose exec airflow airflow pools set dimensions 1 "Rebuild Gold dimensi
 - Prove a rerun changes nothing (run it after any backfill finishes; `dags test` ignores the `dimensions` pool):
   ```bash
   HASH="select cityHash64(groupArray(tuple(*))) from (select * from gold.daily_revenue_by_category where business_date = '2017-11-24' order by product_category)"
-  docker compose exec warehouse clickhouse-client --user warehouse --password warehouse -q "$HASH"
+  docker compose exec warehouse sh -c 'clickhouse-client --user "$CLICKHOUSE_USER" --password "$CLICKHOUSE_PASSWORD" -q "$0"' "$HASH"
   docker compose exec airflow airflow dags test daily_orders 2017-11-24
-  docker compose exec warehouse clickhouse-client --user warehouse --password warehouse -q "$HASH"   # same value
+  docker compose exec warehouse sh -c 'clickhouse-client --user "$CLICKHOUSE_USER" --password "$CLICKHOUSE_PASSWORD" -q "$0"' "$HASH"   # same value
   ```
-- Query the warehouse: `docker compose exec warehouse clickhouse-client --user warehouse --password warehouse`
+- Query the warehouse: `docker compose exec warehouse sh -c 'clickhouse-client --user "$CLICKHOUSE_USER" --password "$CLICKHOUSE_PASSWORD"'`
 
 ## Gold star schema
 
@@ -2895,7 +2896,7 @@ docker compose up -d shop-db warehouse-test
 .venv/Scripts/python -m pytest
 ```
 
-Tests use the `shop_test` Postgres database and the `warehouse-test` ClickHouse container, and never touch the dev data.
+Tests use the `shop_test` Postgres database and the `warehouse-test` ClickHouse container, and never touch the dev data. They read the credentials from `.env` too.
 ````
 
 - [ ] **Step 10: Commit**
