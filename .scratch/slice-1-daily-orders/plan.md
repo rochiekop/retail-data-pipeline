@@ -18,6 +18,7 @@
 - Business Date = date part of `order_purchase_timestamp`, the timestamp as stored (São Paulo local time).
 - Revenue = sum of Order Item `price`, excluding Freight, for Orders whose status is not `canceled` or `unavailable`.
 - Bronze is append-only. Every source column is `Nullable(String)`. Shop tables add `_business_date Date` and `_loaded_at DateTime64(6, 'UTC')`; catalog tables add `_source_checksum String` and `_loaded_at`.
+- The latest shop load for a Business Date is the latest row in `bronze.shop_loads` for that date, never each table's own `max(_loaded_at)`. A rerun that finds no rows inserts nothing into a table, so a per-table max would silently fall back to the older load.
 - Silver tables and Gold fact tables are `MergeTree`, `partition by business_date`. A run drops its Business Date's partition and then inserts.
 - The dbt profile sets `join_use_nulls: 1`. Without it, ClickHouse LEFT JOINs return `''` or `0` instead of NULL and the Silver checks silently pass bad rows.
 - **Unique CTE names:** dbt inlines ephemeral models as nested CTEs, so every CTE name must be unique across models (`orders_src`, `items_typed`, ...), never a generic `src` or `typed`.
@@ -851,7 +852,7 @@ git commit -m "feat: generate the Merchandising Catalog workbook from Olist"
   - `bronze.SHOP_EXTRACTS: dict[str, str]`, with keys `orders`, `order_items`, `order_payments` (Postgres queries taking `%(d)s`)
   - `bronze.ensure_bronze_tables(client: Client) -> None`
   - `bronze.extract_shop(business_date: date) -> dict[str, int]`: rows loaded per table
-  - ClickHouse tables `bronze.orders`, `bronze.order_items` and `bronze.order_payments` (contract columns as `Nullable(String)`, plus `_business_date Date`, `_loaded_at DateTime64(6, 'UTC')`, `partition by toYYYYMM(_business_date)`), and `bronze.products` and `bronze.category_translation` (contract columns as `Nullable(String)`, plus `_source_checksum String`, `_loaded_at DateTime64(6, 'UTC')`)
+  - ClickHouse tables `bronze.orders`, `bronze.order_items` and `bronze.order_payments` (contract columns as `Nullable(String)`, plus `_business_date Date`, `_loaded_at DateTime64(6, 'UTC')`, `partition by toYYYYMM(_business_date)`), `bronze.shop_loads` (`_business_date Date`, `_loaded_at DateTime64(6, 'UTC')`, `row_counts Map(String, UInt64)`: one row per extract, written after its tables, even when it found no rows), and `bronze.products` and `bronze.category_translation` (contract columns as `Nullable(String)`, plus `_source_checksum String`, `_loaded_at DateTime64(6, 'UTC')`)
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -859,6 +860,9 @@ git commit -m "feat: generate the Merchandising Catalog workbook from Olist"
 ```python
 from datetime import date
 
+import psycopg
+
+from pipeline import config
 from pipeline.bronze import extract_shop
 
 D = date(2017, 11, 24)
@@ -873,6 +877,11 @@ def test_extracts_only_orders_purchased_on_the_business_date(seeded_shop, wareho
     ids = {r[0] for r in _rows(warehouse_client, "select order_id from bronze.orders")}
     # o3 at 23:59:59 belongs to D; o4 at 00:00:00 the next day does not.
     assert ids == {"o1", "o2", "o3", "o5"}
+
+
+def test_midnight_order_belongs_to_the_next_day(seeded_shop, warehouse_client):
+    assert extract_shop(date(2017, 11, 25)) == {"orders": 1, "order_items": 1, "order_payments": 1}
+    assert _rows(warehouse_client, "select order_id from bronze.orders") == [("o4",)]
 
 
 def test_source_values_are_stored_as_text(seeded_shop, warehouse_client):
@@ -907,6 +916,20 @@ def test_rerun_appends_a_new_load(seeded_shop, warehouse_client):
 
 def test_day_without_orders_loads_nothing(seeded_shop, warehouse_client):
     assert extract_shop(date(2017, 1, 1)) == {"orders": 0, "order_items": 0, "order_payments": 0}
+
+
+def test_rerun_that_finds_nothing_becomes_the_latest_load(seeded_shop, warehouse_client):
+    extract_shop(D)
+    with psycopg.connect(config.shop_db().conninfo()) as shop:
+        shop.execute("delete from shop.orders where order_purchase_timestamp::date = %s", (D,))
+    extract_shop(D)
+    latest = _rows(
+        warehouse_client,
+        "select count() from bronze.orders where _business_date = {d:Date} and _loaded_at = "
+        "(select max(_loaded_at) from bronze.shop_loads where _business_date = {d:Date})",
+        d=D,
+    )
+    assert latest == [(0,)]
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -930,17 +953,19 @@ from pipeline.olist import CATALOG_SHEETS, SHOP_TABLES
 from pipeline.warehouse import connect
 
 
-def _select_list(table: str) -> str:
-    return ", ".join(f"x.{c}::text" for c in SHOP_TABLES[table][1])
+def _select_list(table: str, alias: str = "x") -> str:
+    return ", ".join(f"{alias}.{c}::text" for c in SHOP_TABLES[table][1])
 
+
+# Business Date: the date part of the purchase timestamp as stored (Sao Paulo local time).
+_ON_BUSINESS_DATE = "o.order_purchase_timestamp::date = %(d)s"
 
 SHOP_EXTRACTS: dict[str, str] = {
-    "orders": f"select {_select_list('orders')} from shop.orders x "
-    "where x.order_purchase_timestamp::date = %(d)s",
+    "orders": f"select {_select_list('orders', 'o')} from shop.orders o where {_ON_BUSINESS_DATE}",
     "order_items": f"select {_select_list('order_items')} from shop.order_items x "
-    "join shop.orders o on o.order_id = x.order_id where o.order_purchase_timestamp::date = %(d)s",
+    f"join shop.orders o on o.order_id = x.order_id where {_ON_BUSINESS_DATE}",
     "order_payments": f"select {_select_list('order_payments')} from shop.order_payments x "
-    "join shop.orders o on o.order_id = x.order_id where o.order_purchase_timestamp::date = %(d)s",
+    f"join shop.orders o on o.order_id = x.order_id where {_ON_BUSINESS_DATE}",
 }
 
 _SHOP_TABLE_DDL = """
@@ -951,6 +976,18 @@ create table if not exists bronze.{table} (
 )
 engine = MergeTree
 partition by toYYYYMM(_business_date)
+order by (_business_date, _loaded_at)
+"""
+
+# One row per shop extract, written after its tables, even when it found no rows. Silver reads every
+# shop table at the latest of these, so a rerun that finds nothing replaces the older load.
+_SHOP_LOADS_DDL = """
+create table if not exists bronze.shop_loads (
+    _business_date Date,
+    _loaded_at DateTime64(6, 'UTC'),
+    row_counts Map(String, UInt64)
+)
+engine = MergeTree
 order by (_business_date, _loaded_at)
 """
 
@@ -972,22 +1009,24 @@ def _text_columns(columns: list[str]) -> str:
 def ensure_bronze_tables(client: Client) -> None:
     client.command("create database if not exists bronze")
     for table in SHOP_EXTRACTS:
-        client.command(_SHOP_TABLE_DDL.format(table=table, columns=_text_columns(SHOP_TABLES[table][1])))
+        _, columns = SHOP_TABLES[table]
+        client.command(_SHOP_TABLE_DDL.format(table=table, columns=_text_columns(columns)))
+    client.command(_SHOP_LOADS_DDL)
     for sheet, (_, columns) in CATALOG_SHEETS.items():
         client.command(_CATALOG_TABLE_DDL.format(table=sheet, columns=_text_columns(columns)))
 
 
 def extract_shop(business_date: date) -> dict[str, int]:
-    # ClickHouse has no multi-table transactions: each table's insert is atomic on its own,
-    # and Silver reads each table's latest load independently.
+    # ClickHouse has no multi-table transactions: each table's insert is atomic on its own, and the
+    # load only becomes visible to Silver once bronze.shop_loads records it, after every table.
     loaded_at = datetime.now(timezone.utc)
     client = connect()
     try:
         ensure_bronze_tables(client)
         counts = {}
-        with psycopg.connect(config.shop_db().conninfo()) as src:
+        with psycopg.connect(config.shop_db().conninfo()) as shop:
             for table, query in SHOP_EXTRACTS.items():
-                rows = src.execute(query, {"d": business_date}).fetchall()
+                rows = shop.execute(query, {"d": business_date}).fetchall()
                 if rows:
                     client.insert(
                         table,
@@ -996,6 +1035,12 @@ def extract_shop(business_date: date) -> dict[str, int]:
                         database="bronze",
                     )
                 counts[table] = len(rows)
+        client.insert(
+            "shop_loads",
+            [(business_date, loaded_at, counts)],
+            column_names=["_business_date", "_loaded_at", "row_counts"],
+            database="bronze",
+        )
         return counts
     finally:
         client.close()
@@ -1004,7 +1049,7 @@ def extract_shop(business_date: date) -> dict[str, int]:
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `.venv/Scripts/python -m pytest tests/test_bronze_shop.py -v`
-Expected: 4 passed
+Expected: 6 passed
 
 - [ ] **Step 5: Commit**
 
@@ -1229,7 +1274,7 @@ def add_bronze_rows(warehouse_client):
 
     def add(table: str, rows: list[dict], business_date: date = BUSINESS_DATE) -> None:
         loaded_at = warehouse_client.query(
-            f"select max(_loaded_at) from bronze.{table} where _business_date = {{d:Date}}",
+            "select max(_loaded_at) from bronze.shop_loads where _business_date = {d:Date}",
             parameters={"d": business_date},
         ).result_rows[0][0]
         for row in rows:
@@ -1494,7 +1539,7 @@ retail:
     from {{ source('bronze', table) }}
     where _business_date = {{ business_date() }}
       and _loaded_at = (
-          select max(_loaded_at) from {{ source('bronze', table) }}
+          select max(_loaded_at) from {{ source('bronze', 'shop_loads') }}
           where _business_date = {{ business_date() }}
       )
 {%- endmacro %}
@@ -1517,6 +1562,7 @@ sources:
       - name: orders
       - name: order_items
       - name: order_payments
+      - name: shop_loads
       - name: products
       - name: category_translation
 ```

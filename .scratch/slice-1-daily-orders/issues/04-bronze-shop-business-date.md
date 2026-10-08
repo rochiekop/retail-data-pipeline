@@ -13,7 +13,8 @@
 - [ ] Each row carries its Business Date and load time
 - [ ] A second load of the same date is added alongside the first, not over it
 - [ ] A day with no Orders loads nothing and doesn't fail
+- [ ] Every load is recorded in `bronze.shop_loads`, even when it finds nothing, so a rerun that now finds no rows replaces the older load
 
 **How to check it yourself:**
-- Tests: `.venv/Scripts/python -m pytest tests/test_bronze_shop.py -v` shows 4 passed
+- Tests: `.venv/Scripts/python -m pytest tests/test_bronze_shop.py -v` shows 6 passed
 - Look at the data: `docker compose exec warehouse-test clickhouse-client --user warehouse --password warehouse -q "select * from bronze.orders limit 5"` right after the tests, or against `warehouse` once real data is loaded
