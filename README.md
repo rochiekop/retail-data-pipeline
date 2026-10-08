@@ -1,19 +1,16 @@
 # Retail Data Pipeline
 
-An end-to-end ELT learning pipeline for an e-commerce business (Olist). The vocabulary is in [CONTEXT.md](CONTEXT.md) and the decisions are in [docs/adr](docs/adr).
+An end-to-end ELT learning pipeline for an e-commerce business (Olist). 
 
 Shop Database (Postgres) + Merchandising Catalog (Excel) → **Bronze** → **Silver** (+ Quarantine) → **Gold** star schema, all in ClickHouse, one Business Date per run, orchestrated by Airflow.
 
-![Daily Orders pipeline: sources, Python, the ClickHouse + dbt medallion, analytics and the tech stack](docs/pipeline-flow.svg)
+![Daily Orders pipeline: seven numbered steps with the tools each uses](docs/pipeline-flow.svg)
 
-Airflow runs the daily steps at 00:00 WIB (Asia/Jakarta). The Business Date is still the calendar day of each Order's purchase timestamp as stored (São Paulo time); the schedule's timezone only decides when runs fire. A walkthrough of one Business Date through every layer is in [docs/pipeline-flow.html](docs/pipeline-flow.html).
+Airflow runs the daily steps at 00:00 WIB (Asia/Jakarta). The Business Date is still the calendar day of each Order's purchase timestamp as stored ; the schedule's timezone only decides when runs fire.
 
 ## Setup
 
-Download https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce into `data/olist/raw/` first (on Linux, `docker compose up` would otherwise create `data/` owned by root). Then:
-
 ```bash
-cp .env.example .env                               # then set your own passwords in .env (git-ignored)
 python -m venv .venv
 .venv/Scripts/python -m pip install -e ".[dev]"     # .venv/bin/... on macOS/Linux
 docker compose up -d --build
@@ -35,11 +32,11 @@ docker compose exec airflow airflow pools set dimensions 1 "Rebuild Gold dimensi
 - Prove a rerun changes nothing (run it after any backfill finishes; `dags test` ignores the `dimensions` pool):
   ```bash
   HASH="select cityHash64(groupArray(tuple(*))) from (select * from gold.daily_revenue_by_category where business_date = '2017-11-24' order by product_category)"
-  docker compose exec warehouse sh -c 'clickhouse-client --user "$CLICKHOUSE_USER" --password "$CLICKHOUSE_PASSWORD" -q "$0"' "$HASH"
+  docker compose exec warehouse clickhouse-client --user warehouse --password warehouse -q "$HASH"
   docker compose exec airflow airflow dags test daily_orders 2017-11-24
-  docker compose exec warehouse sh -c 'clickhouse-client --user "$CLICKHOUSE_USER" --password "$CLICKHOUSE_PASSWORD" -q "$0"' "$HASH"   # same value
+  docker compose exec warehouse clickhouse-client --user warehouse --password warehouse -q "$HASH"   # same value
   ```
-- Query the warehouse: `docker compose exec warehouse sh -c 'clickhouse-client --user "$CLICKHOUSE_USER" --password "$CLICKHOUSE_PASSWORD"'`
+- Query the warehouse: `docker compose exec warehouse clickhouse-client --user warehouse --password warehouse`
 
 ## Gold star schema
 
@@ -55,4 +52,4 @@ docker compose up -d shop-db warehouse-test
 .venv/Scripts/python -m pytest
 ```
 
-Tests use the `shop_test` Postgres database and the `warehouse-test` ClickHouse container, and never touch the dev data. They read the credentials from `.env` too.
+Tests use the `shop_test` Postgres database and the `warehouse-test` ClickHouse container, and never touch the dev data.
