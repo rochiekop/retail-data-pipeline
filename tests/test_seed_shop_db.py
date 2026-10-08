@@ -4,7 +4,7 @@ import psycopg
 import pytest
 
 from pipeline import config
-from pipeline.olist import SourceSchemaError
+from pipeline.olist import SHOP_TABLES, SourceSchemaError
 from pipeline.seed import seed_shop_db
 from tests.conftest import FIXTURES
 
@@ -50,4 +50,35 @@ def test_changed_columns_fail_the_seed(tmp_path):
     header_renamed = orders.read_text(encoding="utf-8").replace('"order_status"', '"status"', 1)
     orders.write_text(header_renamed, encoding="utf-8")
     with pytest.raises(SourceSchemaError, match="olist_orders_dataset.csv"):
+        seed_shop_db(source)
+
+
+def test_shop_tables_have_exactly_the_contract_columns():
+    seed_shop_db(FIXTURES)
+    for table, (_, columns) in SHOP_TABLES.items():
+        actual = [
+            r[0]
+            for r in _fetch(
+                "select column_name from information_schema.columns "
+                f"where table_schema = 'shop' and table_name = '{table}' order by ordinal_position"
+            )
+        ]
+        assert actual == columns, table
+
+
+def test_missing_column_fails_the_seed(tmp_path):
+    source = tmp_path / "olist"
+    shutil.copytree(FIXTURES, source)
+    sellers = source / "olist_sellers_dataset.csv"
+    lines = sellers.read_text(encoding="utf-8").splitlines()
+    sellers.write_text("\n".join(line.rsplit(",", 1)[0] for line in lines) + "\n", encoding="utf-8")
+    with pytest.raises(SourceSchemaError, match="olist_sellers_dataset.csv"):
+        seed_shop_db(source)
+
+
+def test_missing_file_fails_the_seed(tmp_path):
+    source = tmp_path / "olist"
+    shutil.copytree(FIXTURES, source)
+    (source / "olist_order_payments_dataset.csv").unlink()
+    with pytest.raises(FileNotFoundError, match="olist_order_payments_dataset.csv"):
         seed_shop_db(source)

@@ -110,7 +110,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.target == "shop-db":
         print(seed_shop_db(config.olist_dir()))
-    else:
+    elif args.target == "catalog":
         out_path = config.catalog_path()
         build_catalog(config.olist_dir(), out_path)
         print(f"wrote {out_path}")
