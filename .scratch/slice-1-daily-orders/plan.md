@@ -18,7 +18,7 @@
 - Business Date = date part of `order_purchase_timestamp`, the timestamp as stored (São Paulo local time).
 - Revenue = sum of Order Item `price`, excluding Freight, for Orders whose status is not `canceled` or `unavailable`.
 - Bronze is append-only. Every source column is `Nullable(String)`. Shop tables add `_business_date Date` and `_loaded_at DateTime64(6, 'UTC')`; catalog tables add `_source_checksum String` and `_loaded_at`.
-- The latest shop load for a Business Date is the latest row in `bronze.shop_loads` for that date, never each table's own `max(_loaded_at)`. A rerun that finds no rows inserts nothing into a table, so a per-table max would silently fall back to the older load.
+- The latest shop load for a Business Date is the latest row in `bronze.shop_loads` for that date, never each table's own `max(_loaded_at)`. A rerun that finds no rows inserts nothing into a table, so a per-table max would silently fall back to the older load. Likewise, the latest catalog load is the latest row in `bronze.catalog_loads`.
 - Silver tables and Gold fact tables are `MergeTree`, `partition by business_date`. A run drops its Business Date's partition and then inserts.
 - The dbt profile sets `join_use_nulls: 1`. Without it, ClickHouse LEFT JOINs return `''` or `0` instead of NULL and the Silver checks silently pass bad rows.
 - **Unique CTE names:** dbt inlines ephemeral models as nested CTEs, so every CTE name must be unique across models (`orders_src`, `items_typed`, ...), never a generic `src` or `typed`.
@@ -1063,12 +1063,14 @@ git commit -m "feat: extract a Business Date of Orders, Order Items and Payments
 ### Task 5: Extract and load the Merchandising Catalog into Bronze
 
 **Files:**
-- Modify: `src/pipeline/bronze.py` (add `extract_catalog`)
+- Modify: `src/pipeline/bronze.py` (add `extract_catalog`; `ensure_bronze_tables` also creates `bronze.catalog_loads`)
 - Test: `tests/test_bronze_catalog.py`
 
 **Interfaces:**
 - Consumes: `bronze.ensure_bronze_tables`, `warehouse.connect()`, `olist.CATALOG_SHEETS`, `olist.SourceSchemaError`
-- Produces: `bronze.extract_catalog(path: Path) -> int | None`: rows loaded, or `None` when a file with the same SHA-256 checksum is already in Bronze
+- Produces:
+  - `bronze.extract_catalog(path: Path) -> int | None`: rows loaded, or `None` when a file with the same SHA-256 checksum is already in Bronze
+  - ClickHouse table `bronze.catalog_loads` (`_source_checksum String`, `_loaded_at DateTime64(6, 'UTC')`, `row_counts Map(String, UInt64)`): one row per loaded catalog file, written after both sheets, even when a sheet is empty
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1106,6 +1108,19 @@ def test_edited_catalog_is_loaded_again(catalog_file, warehouse_client):
     workbook.save(catalog_file)
     assert extract_catalog(catalog_file) == 5
     assert _rows(warehouse_client, "select uniqExact(_loaded_at) from bronze.products") == [(2,)]
+
+
+def test_emptied_sheet_replaces_the_older_load(catalog_file, warehouse_client):
+    extract_catalog(catalog_file)
+    workbook = load_workbook(catalog_file)
+    workbook["category_translation"].delete_rows(2, 2)  # every translation removed
+    workbook.save(catalog_file)
+    assert extract_catalog(catalog_file) == 3
+    assert _rows(
+        warehouse_client,
+        "select count() from bronze.category_translation "
+        "where _loaded_at = (select max(_loaded_at) from bronze.catalog_loads)",
+    ) == [(0,)]
 
 
 def test_blank_rows_are_ignored(catalog_file, warehouse_client):
@@ -1161,8 +1176,21 @@ Expected: ERROR, `ImportError: cannot import name 'extract_catalog'`
 
 - [ ] **Step 3: Implement catalog extraction**
 
-In `src/pipeline/bronze.py`, add `import hashlib`, `from pathlib import Path` and `from openpyxl import load_workbook` to the imports, change the olist import to `from pipeline.olist import CATALOG_SHEETS, SHOP_TABLES, SourceSchemaError`, and append:
+In `src/pipeline/bronze.py`, add `import hashlib`, `from pathlib import Path` and `from openpyxl import load_workbook` to the imports, change the olist import to `from pipeline.olist import CATALOG_SHEETS, SHOP_TABLES, SourceSchemaError`, add `client.command(_CATALOG_LOADS_DDL)` as the last line of `ensure_bronze_tables`, and append:
 ```python
+# One row per loaded catalog file, written after both sheets, even when a sheet is empty. It is what
+# "already loaded" checks, and Silver reads both sheets at the latest of these.
+_CATALOG_LOADS_DDL = """
+create table if not exists bronze.catalog_loads (
+    _source_checksum String,
+    _loaded_at DateTime64(6, 'UTC'),
+    row_counts Map(String, UInt64)
+)
+engine = MergeTree
+order by _loaded_at
+"""
+
+
 def _read_catalog(path: Path) -> dict[str, list[tuple]]:
     workbook = load_workbook(path, read_only=True)
     missing = [sheet for sheet in CATALOG_SHEETS if sheet not in workbook.sheetnames]
@@ -1195,7 +1223,7 @@ def extract_catalog(path: Path) -> int | None:
     try:
         ensure_bronze_tables(client)
         already_loaded = client.query(
-            "select 1 from bronze.products where _source_checksum = {c:String} limit 1",
+            "select 1 from bronze.catalog_loads where _source_checksum = {c:String} limit 1",
             parameters={"c": checksum},
         ).result_rows
         if already_loaded:
@@ -1209,7 +1237,14 @@ def extract_catalog(path: Path) -> int | None:
                     column_names=[*CATALOG_SHEETS[sheet][1], "_source_checksum", "_loaded_at"],
                     database="bronze",
                 )
-        return sum(len(rows) for rows in sheets.values())
+        row_counts = {sheet: len(rows) for sheet, rows in sheets.items()}
+        client.insert(
+            "catalog_loads",
+            [(checksum, loaded_at, row_counts)],
+            column_names=["_source_checksum", "_loaded_at", "row_counts"],
+            database="bronze",
+        )
+        return sum(row_counts.values())
     finally:
         client.close()
 ```
@@ -1547,7 +1582,7 @@ retail:
 {% macro latest_catalog_load(table) -%}
     select *
     from {{ source('bronze', table) }}
-    where _loaded_at = (select max(_loaded_at) from {{ source('bronze', table) }})
+    where _loaded_at = (select max(_loaded_at) from {{ source('bronze', 'catalog_loads') }})
 {%- endmacro %}
 ```
 
@@ -1565,6 +1600,7 @@ sources:
       - name: shop_loads
       - name: products
       - name: category_translation
+      - name: catalog_loads
 ```
 
 - [ ] **Step 5: Create Silver Orders and the Quarantine**
