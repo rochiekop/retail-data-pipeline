@@ -24,12 +24,18 @@ GOLD_REVENUE = """
     from gold.daily_revenue_by_category
     where business_date between {start:Date} and {end:Date}
 """
+QUARANTINED_ROWS = """
+    select count()
+    from silver.quarantine
+    where business_date between {start:Date} and {end:Date}
+"""
 
 
 @dataclass(frozen=True)
 class Reconciliation:
     source_revenue: Decimal
     gold_revenue: Decimal
+    quarantined_rows: int
 
     @property
     def matches(self) -> bool:
@@ -41,10 +47,12 @@ def reconcile(start: date, end: date) -> Reconciliation:
         source = shop.execute(SOURCE_REVENUE, (start, end)).fetchone()[0]
     client = connect()
     try:
-        gold = client.query(GOLD_REVENUE, parameters={"start": start, "end": end}).result_rows[0][0]
+        params = {"start": start, "end": end}
+        gold = client.query(GOLD_REVENUE, parameters=params).result_rows[0][0]
+        quarantined = client.query(QUARANTINED_ROWS, parameters=params).result_rows[0][0]
     finally:
         client.close()
-    return Reconciliation(Decimal(source), Decimal(gold))
+    return Reconciliation(Decimal(source), Decimal(gold), quarantined)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -55,6 +63,7 @@ def main(argv: list[str] | None = None) -> int:
     result = reconcile(args.start, args.end)
     print(f"Shop Database Revenue: {result.source_revenue}")
     print(f"Gold Revenue:          {result.gold_revenue}")
+    print(f"Quarantined rows:      {result.quarantined_rows}")
     print("MATCH" if result.matches else "MISMATCH")
     return 0 if result.matches else 1
 
